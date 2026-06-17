@@ -1,10 +1,11 @@
 {
-  "name": "discord",
+  "name": "obfuscord",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
     "build": "bun build --target node --external electron --outdir dist index.ts",
-    "start": "bun run build && electron ."
+    "start": "bun run build && electron .",
+    "start:debug": "bun run build && cmd /c \"set DEBUG_PROXY=true && electron .\""
   },
   "private": true,
   "devDependencies": {
