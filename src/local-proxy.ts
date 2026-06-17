@@ -33,6 +33,11 @@ export interface ProxyInfo {
  */
 export async function startProxy(): Promise<ProxyInfo> {
   const server = net.createServer({ keepAlive: true }, (clientSocket) => {
+    // Enforce an idle timeout so an unresponsive client does not hold
+    // the socket open indefinitely.
+    clientSocket.setTimeout(60_000, () => {
+      clientSocket.destroy()
+    })
     handleConnection(clientSocket)
   })
 

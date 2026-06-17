@@ -126,12 +126,22 @@ export async function terminateTls(
  * because the wrapping approach can fail to populate `getPeerCertificate()`
  * in some Electron / Node.js versions when `servername` is `undefined`.
  *
- * @param ip   - Target IP address (resolved via DoH)
- * @param port - Target port (typically 443)
+ * A safety timeout protects against sockets that hang indefinitely when
+ * the remote server is unresponsive.
+ *
+ * @param ip        - Target IP address (resolved via DoH)
+ * @param port      - Target port (typically 443)
+ * @param timeoutMs - Connection timeout in milliseconds (default 15 000)
  * @returns A promise that resolves with the secure TLSSocket
  */
-function tlsConnect(ip: string, port: number): Promise<tls.TLSSocket> {
+function tlsConnect(
+  ip: string,
+  port: number,
+  timeoutMs = 15_000,
+): Promise<tls.TLSSocket> {
   return new Promise<tls.TLSSocket>((resolve, reject) => {
+    let settled = false
+
     const socket = tls.connect({
       host: ip,
       port,
@@ -140,16 +150,44 @@ function tlsConnect(ip: string, port: number): Promise<tls.TLSSocket> {
       checkServerIdentity: () => undefined, // Bypass hostname check (no SNI)
     })
 
-    socket.on('secureConnect', () => resolve(socket))
-    socket.on('error', reject)
+    // Safety timeout — destroy socket + reject if no response in time
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        socket.destroy()
+        reject(new Error(`TLS connect timeout (${timeoutMs}ms) to ${ip}:${port}`))
+      }
+    }, timeoutMs)
+
+    socket.on('secureConnect', () => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        resolve(socket)
+      }
+    })
+
+    socket.on('error', (err) => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        reject(err)
+      }
+    })
   })
 }
 
 /**
  * Waits for the TLS handshake to complete on a TLSSocket.
- * Rejects if the handshake fails.
+ * Rejects if the handshake fails or a timeout elapses.
+ *
+ * @param socket    - The TLSSocket to wait on
+ * @param timeoutMs - Handshake timeout in milliseconds (default 10 000)
  */
-function waitForSecure(socket: tls.TLSSocket): Promise<void> {
+function waitForSecure(
+  socket: tls.TLSSocket,
+  timeoutMs = 10_000,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     // If already secure (e.g., client socket connected synchronously)
     if (socket.encrypted) {
@@ -157,19 +195,41 @@ function waitForSecure(socket: tls.TLSSocket): Promise<void> {
       return
     }
 
+    let settled = false
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        cleanup()
+        reject(new Error(`TLS handshake timeout (${timeoutMs}ms)`))
+      }
+    }, timeoutMs)
+
     const onSecure = () => {
-      cleanup()
-      resolve()
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        cleanup()
+        resolve()
+      }
     }
 
     const onError = (err: Error) => {
-      cleanup()
-      reject(err)
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        cleanup()
+        reject(err)
+      }
     }
 
     const onClose = () => {
-      cleanup()
-      reject(new Error('TLS socket closed during handshake'))
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        cleanup()
+        reject(new Error('TLS socket closed during handshake'))
+      }
     }
 
     const cleanup = () => {

@@ -121,7 +121,8 @@ index.ts
 
 | หน้าที่ | รายละเอียด |
 |---------|-----------|
-| `certificate-error` handler | ลงทะเบียนตั้งแต่ module level (บรรทัด 35) เพื่อรับ self-signed cert ที่ proxy สร้าง — ต้องมาก่อน `app.whenReady()` |
+| `certificate-error` handler | ลงทะเบียนตั้งแต่ module level เพื่อรับ self-signed cert ที่ proxy สร้าง — **ตรวจสอบ issuerName ว่าตรงกับ CA (`getCaName()`) ก่อน accept** — ต้องมาก่อน `app.whenReady()` |
+| `setCertificateVerifyProc` | ตรวจสอบ issuerName ของ cert ที่ Chromium ได้ผ่าน network service — accept เฉพาะ cert ที่ CA ของเราออก, นอกนั้นใช้ Chromium default verification (`callback(-3)`) |
 | `bootstrap()` | เรียก `initCa()` → `startProxy()` → คืนค่า proxy port |
 | `session.setProxy()` | กำหนดให้ Chromium ใช้ proxy ของเรา — ต้องเรียก **หลัง** `app.whenReady()` |
 | `createWindow()` | สร้าง `BrowserWindow` ด้วย `sandbox: true`, `contextIsolation: true`, `nodeIntegration: false` |
@@ -224,6 +225,21 @@ Client  ──HTTPS──▶  cloudflare-dns.com/dns-query?name=discord.com&type
 
 **ข้อจำกัดสำคัญ:** IPv4 **เท่านั้น** — DNS query ใช้ type A (ไม่รองรับ AAAA record สำหรับ IPv6)
 
+#### DNS Cache (In-Memory)
+
+เพื่อลด latency ที่เกิดจากการเรียก DoH ซ้ำ ๆ สำหรับ domain เดิม (เช่น CDN assets หลายไฟล์จาก `cdn.discordapp.com`), ระบบมี **in-memory DNS cache**:
+
+- **TTL จาก response จริง** — ใช้ค่า TTL ที่ Cloudflare/Google คืนมา **clamp** ไว้ที่ 60–600 วินาที
+- **Cache key** — hostname (เช่น `discord.com`, `cdn.discordapp.com`)
+- `resolveA()` เช็ค cache ก่อน DoH → cache hit → คืนทันที → **ลด latency ~50-150ms** ต่อ request
+- cache expire → resolution ใหม่โดยอัตโนมัติผ่าน Cloudflare → Google fallback
+
+```
+resolveA("discord.com")
+  ├── DNS Cache hit (TTL ยังไม่หมด) → return cached IPs
+  └── DNS Cache miss → DoH Cloudflare → cache result → return
+```
+
 ### 4. `src/local-proxy.ts` — HTTP CONNECT Proxy
 
 TCP proxy server ขนาดเล็กที่ทำงานบน `localhost:random`
@@ -246,6 +262,8 @@ HTTP/1.1 200 Connection Established
 - Random port (`listen(0, '127.0.0.1')`) — ป้องกัน port contention
 - อ่าน HTTP headers แบบบรรทัดต่อบรรทัดจนเจอ `\r\n\r\n`
 - เมื่อได้ hostname:port แล้ว ส่งต่อไปยัง `terminateTls()` ทันที
+- **Idle timeout 60 วินาที** — client socket ที่ไม่ตอบสนองจะถูก `destroy()` โดยอัตโนมัติ ป้องกัน resource leak (`clientSocket.setTimeout(60_000)`)
+
 
 ### 5. `src/terminator.ts` — TLS Termination Bridge
 
@@ -314,6 +332,17 @@ if (pinError) {
 - `checkServerIdentity: () => undefined` → ถูก bypass (เพราะไม่มี SNI) แต่ **ป้องกันด้วย Certificate Pinning**:
   - `verifyPin()` ตรวจสอบ SPKI fingerprint เทียบกับค่าที่ pre-fetch ไว้
   - ถ้าไม่ตรง → reject connection ทันที → ป้องกัน MITM
+
+#### Safety Timeouts
+
+เพื่อป้องกัน connection ค้างเมื่อ Discord server ไม่ตอบสนอง (network partition, server down), ฟังก์ชันหลักทั้งสองมี timeout:
+
+| ฟังก์ชัน | ใช้ที่ | Timeout | Default | เกิดอะไรขึ้นเมื่อ timeout |
+|----------|-------|---------|---------|------------------------|
+| `tlsConnect()` | Client-side TLS ไปยัง Discord IP | `timeoutMs` | 15,000 ms | destroy socket + reject promise → log error |
+| `waitForSecure()` | Server-side TLS กับ Chromium | `timeoutMs` | 10,000 ms | reject promise → cleanup socket |
+
+ทั้งสองฟังก์ชันใช้ `settled` flag และ `clearTimeout()` เพื่อป้องกัน **double resolve/reject** — กรณี socket เกิดทั้ง `secureConnect` และ `error` พร้อมกัน จะมีเพียง event แรกเท่านั้นที่ถูกดำเนินการ
 
 ---
 
@@ -407,7 +436,7 @@ terminateTls("discord.com")
 ```
 
 **หมายเหตุสำคัญ:**
-- `certificate-error` handler **ต้องอยู่ที่ module level** (index.ts บรรทัด 35) เพราะ Electron อาจ emit event นี้ก่อน `app.whenReady()`
+- `certificate-error` handler **ต้องอยู่ที่ module level** (ใน `index.ts`) เพราะ Electron อาจ emit event นี้ก่อน `app.whenReady()` — ปัจจุบันตรวจสอบ issuerName ว่า cert มาจาก CA ของเราหรือไม่
 - `initCa()` **ต้องมาก่อน** `startProxy()` เพราะเมื่อ Chromium ส่ง CONNECT มา ฟังก์ชัน `signCert()` จะถูกเรียกทันที
 - `pinAllDiscordDomains()` ทำงานแบบ async (non-blocking) คู่ขนานกับ `startProxy()` — ถ้ามี connection เข้ามาก่อน pinning เสร็จ, TOFU จะจัดการให้
 - `session.setProxy()` **ต้องหลัง** `app.whenReady()` เพราะ `session` ยังไม่พร้อมก่อนหน้านั้น
@@ -449,8 +478,9 @@ terminateTls("discord.com")
 |------|-----------|
 | **No SNI** | การเข้ารหัสสำคัญที่สุด — ไม่มี SNI ใน ClientHello → DPI ไม่รู้ target |
 | **In-Memory CA** | ไม่มี certificate file บนดิสก์ → forensic trace น้อยมาก |
-| **DoH** | DNS resolution ปลอดภัยจาก hijacking/poisoning |
+| **DoH + DNS Cache** | DNS resolution ปลอดภัยจาก hijacking/poisoning + in-memory cache ลด latency ~50-150ms ต่อ request |
 | **Certificate Pinning** | ตรวจสอบ SPKI fingerprint หลัง TLS handshake — ป้องกัน MITM แม้ไม่มี SNI, TOFU + pre-fetch |
+| **Certificate Verification (CA Check)** | `setCertificateVerifyProc` และ `certificate-error` ตรวจสอบ issuerName ว่า cert มาจาก CA ของเราเท่านั้น — ไม่ blanket accept |
 | **Sandboxed Renderer** | Chromium sandbox + context isolation + nodeIntegration ปิด |
 | **Minimal Dependencies** | พึ่งพาแค่ `node-forge` + `electron` — attack surface เล็ก |
 | **Single Responsibility** | แต่ละไฟล์มีหน้าที่เดียวชัดเจน (SOC) |
@@ -462,7 +492,6 @@ terminateTls("discord.com")
 | **IPv4 only** | ถ้า Discord ย้ายเป็น IPv6 ล้วนจะใช้ไม่ได้ | DoH query type A เท่านั้น |
 | **checkServerIdentity bypass** | ไม่ตรวจสอบ hostname (ไม่มี SNI) แต่ **ป้องกันด้วย Certificate Pinning** (`src/pinner.ts`) ซึ่งตรวจสอบ SPKI fingerprint หลัง handshake | `() => undefined` + `verifyPin()` ที่ terminator.ts |
 | **TOFU Risk** | การเชื่อมต่อครั้งแรกไปยัง domain ใด ๆ ยังสุ่มเสี่ยง — ถ้า attacker อยู่บน network ในจังหวะนั้น, pin ที่เก็บจะเป็นของ attacker | pre-fetch อาจยังไม่เสร็จเมื่อ request แรกมา |
-| **ไม่มี Timeout** | Connection ค้างถ้า server ไม่ตอบสนอง → resource leak | ไม่มีการเรียก `setTimeout()` |
 | **ไม่มี Connection Pooling** | ทุก request สร้าง TLS socket ใหม่ → latency + overhead | ใช้ `new tls.TLSSocket()` ทุกครั้ง |
 | **Hardcoded Domains** | ถ้า Discord เปลี่ยน domain structure ต้องอัปเดตเอง | รายชื่อใน doh-resolver.ts:111–118 |
 | **ไม่มี Tests** | เปลี่ยนโค้ดแล้วต้อง manual test ทุกครั้ง | ไม่มี test framework/config |

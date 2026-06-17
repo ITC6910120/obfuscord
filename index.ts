@@ -14,7 +14,7 @@
  */
 
 import { app, BrowserWindow, session, desktopCapturer } from 'electron'
-import { initCa } from './src/ca.js'
+import { initCa, getCaName } from './src/ca.js'
 import { startProxy } from './src/local-proxy.js'
 import { showPicker } from './src/picker.js'
 import { pinAllDiscordDomains } from './src/pinner.js'
@@ -34,9 +34,18 @@ let stopProxy: (() => void) | null = null
 // All external HTTPS passes through our local proxy, which terminates TLS
 // with a self-signed cert. Chromium would normally reject this cert, but
 // we override the certificate-error event to accept it.
-app.on('certificate-error', (event, _webContents, _url, _error, _certificate, callback) => {
-  event.preventDefault()
-  callback(true)
+// Only certificates issued by our in-memory CA are accepted — all others
+// are rejected, preventing a malicious actor from feeding Chromium a fake
+// certificate through our proxy.
+app.on('certificate-error', (event, _webContents, _url, _error, certificate, callback) => {
+  // Accept only if the issuer matches our in-memory Root CA.
+  // certificate can be undefined in some Electron versions.
+  if (certificate?.issuerName?.includes(getCaName())) {
+    event.preventDefault()
+    callback(true)
+  } else {
+    callback(false)
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -148,13 +157,22 @@ async function main(): Promise<void> {
     proxyBypassRules: '<local>',  // Bypass proxy for local traffic
   })
 
-  // Accept all certificates from our local MITM proxy.
+  // Accept only certificates issued by our in-memory Root CA.
   // This hooks directly into Chromium's network service certificate verification
   // pipeline, which is more reliable than the app.on('certificate-error') event
   // in modern Electron (network service runs in a separate process).
-  // callback(0) = success (accept the certificate).
-  session.defaultSession.setCertificateVerifyProc((_request, callback) => {
-    callback(0)
+  //
+  // callback(0)  = trust the certificate.
+  // callback(-3) = fall back to Chromium's default verification (which will
+  //                reject our self-signed cert since it isn't in the system
+  //                trust store).
+  const caName = getCaName()
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    if (request.certificate?.issuerName?.includes(caName)) {
+      callback(0)    // Accept — issued by our CA
+    } else {
+      callback(-3)   // Reject — use Chromium's built-in verification
+    }
   })
 
   // Register display media handler for screen sharing (getDisplayMedia).
