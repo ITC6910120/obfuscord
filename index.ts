@@ -17,6 +17,7 @@ import { app, BrowserWindow, session, desktopCapturer } from 'electron'
 import { initCa } from './src/ca.js'
 import { startProxy } from './src/local-proxy.js'
 import { showPicker } from './src/picker.js'
+import { pinAllDiscordDomains } from './src/pinner.js'
 
 // ---------------------------------------------------------------------------
 // State
@@ -123,6 +124,14 @@ async function bootstrap(): Promise<number> {
   // Step 2: Start local HTTP CONNECT proxy on a random port
   const { port, close } = await startProxy()
   stopProxy = close
+
+  // Step 3: Pre-fetch certificate pins for Discord domains (non-blocking).
+  //   This connects directly to each domain without SNI, retrieves the
+  //   server certificate, and stores its SPKI fingerprint in memory.
+  //   If pre-fetch fails (e.g. network issue), per-request TOFU will
+  //   handle it — the app will still work but without pin protection
+  //   on the very first request to each domain.
+  pinAllDiscordDomains()
 
   return port
 }

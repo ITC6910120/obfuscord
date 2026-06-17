@@ -16,6 +16,7 @@ import net from 'net'
 import tls from 'tls'
 import { signCert } from './ca.js'
 import { resolveA } from './doh-resolver.js'
+import { verifyPin } from './pinner.js'
 
 /**
  * Terminates TLS from Chromium and establishes a new TLS connection to the
@@ -56,7 +57,7 @@ export async function terminateTls(
   await waitForSecure(serverSide)
 
   // -----------------------------------------------------------------------
-  // 4. Resolve the real target IP via DoH and create a TCP connection.
+  // 4. Resolve the real target IP via DoH.
   // -----------------------------------------------------------------------
   const ips = await resolveA(hostname)
   if (ips.length === 0) {
@@ -64,23 +65,39 @@ export async function terminateTls(
     throw new Error(`DoH returned no IPs for ${hostname}`)
   }
 
-  const tcpSocket = net.createConnection(port, ips[0]!)
-
   // -----------------------------------------------------------------------
   // 5. Perform **client-side** TLS to the real server.
   //    No SNI is sent — the target domain is hidden from the network.
+  //
+  //    Uses tls.connect() instead of new tls.TLSSocket(net.createConnection())
+  //    because the latter can fail to populate getPeerCertificate() in some
+  //    Node.js / Electron versions (especially when servername is undefined).
   // -----------------------------------------------------------------------
-  const serverSide2 = new tls.TLSSocket(tcpSocket, {
-    isServer: false,
-    servername: undefined,
-    rejectUnauthorized: true,
-    checkServerIdentity: () => undefined,
-  })
-
-  await waitForSecure(serverSide2)
+  const serverSide2 = await tlsConnect(ips[0]!, port)
 
   // -----------------------------------------------------------------------
-  // 6. Bridge application data between both TLS sockets.
+  // 6. Verify the server's certificate against our stored pin.
+  //    Without SNI we can't check the hostname normally, so we use SPKI
+  //    fingerprint comparison (pinning). If verification fails the
+  //    connection is rejected — preventing MITM attacks.
+  // -----------------------------------------------------------------------
+  const cert = serverSide2.getPeerCertificate()
+
+  // Guard: if the TLS handshake completed, `raw` should always be present.
+  // If it's missing it indicates a Node.js / Electron environment quirk.
+  if (!cert || !cert.raw) {
+    serverSide2.destroy()
+    throw new Error(`No certificate available for ${hostname} (raw missing)`)
+  }
+
+  const pinError = verifyPin(hostname, cert)
+  if (pinError) {
+    serverSide2.destroy()
+    throw pinError
+  }
+
+  // -----------------------------------------------------------------------
+  // 7. Bridge application data between both TLS sockets.
   //    Both sides see plaintext (HTTP/2 frames) after TLS termination.
   // -----------------------------------------------------------------------
   serverSide.pipe(serverSide2)
@@ -99,8 +116,34 @@ export async function terminateTls(
 }
 
 // ---------------------------------------------------------------------------
-// Helper
+// Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Creates a client-side TLS connection to an IP address **without SNI**.
+ *
+ * Uses `tls.connect()` (not `new tls.TLSSocket` wrapping a raw socket)
+ * because the wrapping approach can fail to populate `getPeerCertificate()`
+ * in some Electron / Node.js versions when `servername` is `undefined`.
+ *
+ * @param ip   - Target IP address (resolved via DoH)
+ * @param port - Target port (typically 443)
+ * @returns A promise that resolves with the secure TLSSocket
+ */
+function tlsConnect(ip: string, port: number): Promise<tls.TLSSocket> {
+  return new Promise<tls.TLSSocket>((resolve, reject) => {
+    const socket = tls.connect({
+      host: ip,
+      port,
+      servername: undefined,       // ★ No SNI — obfuscation
+      rejectUnauthorized: true,
+      checkServerIdentity: () => undefined, // Bypass hostname check (no SNI)
+    })
+
+    socket.on('secureConnect', () => resolve(socket))
+    socket.on('error', reject)
+  })
+}
 
 /**
  * Waits for the TLS handshake to complete on a TLSSocket.
