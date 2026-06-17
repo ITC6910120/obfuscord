@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "network-engineer": {
+      "source": "rmyndharis/antigravity-skills",
+      "sourceType": "github",
+      "skillPath": "skills/network-engineer/SKILL.md",
+      "computedHash": "0aed585fe9d45545bf878340f6e76c37b3b23c53ae3ce8ccc4943b985031e343"
+    }
+  }
+}

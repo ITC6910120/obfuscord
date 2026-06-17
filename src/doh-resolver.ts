@@ -16,10 +16,40 @@
 interface DnsAnswer {
   type: number
   data: string
+  TTL?: number // seconds (optional — present in Cloudflare & Google responses)
 }
 
 interface DnsJsonResponse {
   Answer?: DnsAnswer[]
+}
+
+/** Internal result with IPs and the effective TTL from the response. */
+interface DnsResult {
+  ips: string[]
+  ttl: number // seconds
+}
+
+// ---------------------------------------------------------------------------
+// DNS cache
+// ---------------------------------------------------------------------------
+
+const DNS_CACHE_MIN_TTL = 60  // Minimum cache lifetime: 60 s
+const DNS_CACHE_MAX_TTL = 600 // Maximum cache lifetime: 10 min
+
+interface CacheEntry {
+  ips: string[]
+  expiresAt: number // epoch ms
+}
+
+const dnsCache = new Map<string, CacheEntry>()
+
+/** Stores a resolution result with the TTL clamped to [min, max]. */
+function cacheResult(host: string, result: DnsResult): void {
+  const ttl = Math.max(
+    DNS_CACHE_MIN_TTL,
+    Math.min(result.ttl, DNS_CACHE_MAX_TTL),
+  )
+  dnsCache.set(host, { ips: result.ips, expiresAt: Date.now() + ttl * 1000 })
 }
 
 // ---------------------------------------------------------------------------
@@ -27,10 +57,21 @@ interface DnsJsonResponse {
 // ---------------------------------------------------------------------------
 
 /**
+ * Picks the smallest TTL among all A-record answers, falling back to
+ * DNS_CACHE_MIN_TTL if no TTL field is present.
+ */
+function pickTtl(answers: DnsAnswer[]): number {
+  const ttls = answers
+    .filter((a) => a.TTL !== undefined)
+    .map((a) => a.TTL as number)
+  return ttls.length > 0 ? Math.min(...ttls) : DNS_CACHE_MIN_TTL
+}
+
+/**
  * Resolves a hostname via Cloudflare's DNS-over-HTTPS API.
  * Returns IPv4 (type A) records only.
  */
-async function resolveViaCloudflare(host: string): Promise<string[]> {
+async function resolveViaCloudflare(host: string): Promise<DnsResult> {
   const url = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`
   const res = await fetch(url, {
     headers: { accept: 'application/dns-json' },
@@ -41,14 +82,15 @@ async function resolveViaCloudflare(host: string): Promise<string[]> {
   }
 
   const body: DnsJsonResponse = await res.json()
-  return (body.Answer ?? []).filter((r) => r.type === 1).map((r) => r.data)
+  const answers = (body.Answer ?? []).filter((r) => r.type === 1)
+  return { ips: answers.map((r) => r.data), ttl: pickTtl(answers) }
 }
 
 /**
  * Resolves a hostname via Google's DNS-over-HTTPS API (fallback).
  * Returns IPv4 (type A) records only.
  */
-async function resolveViaGoogle(host: string): Promise<string[]> {
+async function resolveViaGoogle(host: string): Promise<DnsResult> {
   const url = `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`
   const res = await fetch(url)
 
@@ -57,7 +99,8 @@ async function resolveViaGoogle(host: string): Promise<string[]> {
   }
 
   const body: DnsJsonResponse = await res.json()
-  return (body.Answer ?? []).filter((r) => r.type === 1).map((r) => r.data)
+  const answers = (body.Answer ?? []).filter((r) => r.type === 1)
+  return { ips: answers.map((r) => r.data), ttl: pickTtl(answers) }
 }
 
 // ---------------------------------------------------------------------------
@@ -66,18 +109,29 @@ async function resolveViaGoogle(host: string): Promise<string[]> {
 
 /**
  * Resolves a hostname to IPv4 addresses via DNS-over-HTTPS.
+ * Results are cached in memory with the TTL provided by the resolver.
+ *
  * Tries Cloudflare first, falls back to Google on failure.
  *
  * @param host - Domain name to resolve (e.g. "discord.com")
  * @returns A promise resolving to an array of IP address strings
  */
 export async function resolveA(host: string): Promise<string[]> {
+  // --- Check in-memory cache ---
+  const cached = dnsCache.get(host)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.ips
+  }
+
   const errors: string[] = []
 
   // Primary: Cloudflare
   try {
-    const ips = await resolveViaCloudflare(host)
-    if (ips.length > 0) return ips
+    const result = await resolveViaCloudflare(host)
+    if (result.ips.length > 0) {
+      cacheResult(host, result)
+      return result.ips
+    }
     errors.push('Cloudflare returned empty answer')
   } catch (err: unknown) {
     errors.push(`Cloudflare: ${(err as Error).message}`)
@@ -85,8 +139,11 @@ export async function resolveA(host: string): Promise<string[]> {
 
   // Fallback: Google
   try {
-    const ips = await resolveViaGoogle(host)
-    if (ips.length > 0) return ips
+    const result = await resolveViaGoogle(host)
+    if (result.ips.length > 0) {
+      cacheResult(host, result)
+      return result.ips
+    }
     errors.push('Google returned empty answer')
   } catch (err: unknown) {
     errors.push(`Google: ${(err as Error).message}`)

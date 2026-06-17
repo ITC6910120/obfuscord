@@ -16,6 +16,7 @@ import net from 'net'
 import tls from 'tls'
 import { signCert } from './ca.js'
 import { resolveA } from './doh-resolver.js'
+import { verifyPin } from './pinner.js'
 
 /**
  * Terminates TLS from Chromium and establishes a new TLS connection to the
@@ -56,7 +57,7 @@ export async function terminateTls(
   await waitForSecure(serverSide)
 
   // -----------------------------------------------------------------------
-  // 4. Resolve the real target IP via DoH and create a TCP connection.
+  // 4. Resolve the real target IP via DoH.
   // -----------------------------------------------------------------------
   const ips = await resolveA(hostname)
   if (ips.length === 0) {
@@ -64,23 +65,39 @@ export async function terminateTls(
     throw new Error(`DoH returned no IPs for ${hostname}`)
   }
 
-  const tcpSocket = net.createConnection(port, ips[0]!)
-
   // -----------------------------------------------------------------------
   // 5. Perform **client-side** TLS to the real server.
   //    No SNI is sent — the target domain is hidden from the network.
+  //
+  //    Uses tls.connect() instead of new tls.TLSSocket(net.createConnection())
+  //    because the latter can fail to populate getPeerCertificate() in some
+  //    Node.js / Electron versions (especially when servername is undefined).
   // -----------------------------------------------------------------------
-  const serverSide2 = new tls.TLSSocket(tcpSocket, {
-    isServer: false,
-    servername: undefined,
-    rejectUnauthorized: true,
-    checkServerIdentity: () => undefined,
-  })
-
-  await waitForSecure(serverSide2)
+  const serverSide2 = await tlsConnect(ips[0]!, port)
 
   // -----------------------------------------------------------------------
-  // 6. Bridge application data between both TLS sockets.
+  // 6. Verify the server's certificate against our stored pin.
+  //    Without SNI we can't check the hostname normally, so we use SPKI
+  //    fingerprint comparison (pinning). If verification fails the
+  //    connection is rejected — preventing MITM attacks.
+  // -----------------------------------------------------------------------
+  const cert = serverSide2.getPeerCertificate()
+
+  // Guard: if the TLS handshake completed, `raw` should always be present.
+  // If it's missing it indicates a Node.js / Electron environment quirk.
+  if (!cert || !cert.raw) {
+    serverSide2.destroy()
+    throw new Error(`No certificate available for ${hostname} (raw missing)`)
+  }
+
+  const pinError = verifyPin(hostname, cert)
+  if (pinError) {
+    serverSide2.destroy()
+    throw pinError
+  }
+
+  // -----------------------------------------------------------------------
+  // 7. Bridge application data between both TLS sockets.
   //    Both sides see plaintext (HTTP/2 frames) after TLS termination.
   // -----------------------------------------------------------------------
   serverSide.pipe(serverSide2)
@@ -99,14 +116,78 @@ export async function terminateTls(
 }
 
 // ---------------------------------------------------------------------------
-// Helper
+// Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Waits for the TLS handshake to complete on a TLSSocket.
- * Rejects if the handshake fails.
+ * Creates a client-side TLS connection to an IP address **without SNI**.
+ *
+ * Uses `tls.connect()` (not `new tls.TLSSocket` wrapping a raw socket)
+ * because the wrapping approach can fail to populate `getPeerCertificate()`
+ * in some Electron / Node.js versions when `servername` is `undefined`.
+ *
+ * A safety timeout protects against sockets that hang indefinitely when
+ * the remote server is unresponsive.
+ *
+ * @param ip        - Target IP address (resolved via DoH)
+ * @param port      - Target port (typically 443)
+ * @param timeoutMs - Connection timeout in milliseconds (default 15 000)
+ * @returns A promise that resolves with the secure TLSSocket
  */
-function waitForSecure(socket: tls.TLSSocket): Promise<void> {
+function tlsConnect(
+  ip: string,
+  port: number,
+  timeoutMs = 15_000,
+): Promise<tls.TLSSocket> {
+  return new Promise<tls.TLSSocket>((resolve, reject) => {
+    let settled = false
+
+    const socket = tls.connect({
+      host: ip,
+      port,
+      servername: undefined,       // ★ No SNI — obfuscation
+      rejectUnauthorized: true,
+      checkServerIdentity: () => undefined, // Bypass hostname check (no SNI)
+    })
+
+    // Safety timeout — destroy socket + reject if no response in time
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        socket.destroy()
+        reject(new Error(`TLS connect timeout (${timeoutMs}ms) to ${ip}:${port}`))
+      }
+    }, timeoutMs)
+
+    socket.on('secureConnect', () => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        resolve(socket)
+      }
+    })
+
+    socket.on('error', (err) => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        reject(err)
+      }
+    })
+  })
+}
+
+/**
+ * Waits for the TLS handshake to complete on a TLSSocket.
+ * Rejects if the handshake fails or a timeout elapses.
+ *
+ * @param socket    - The TLSSocket to wait on
+ * @param timeoutMs - Handshake timeout in milliseconds (default 10 000)
+ */
+function waitForSecure(
+  socket: tls.TLSSocket,
+  timeoutMs = 10_000,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     // If already secure (e.g., client socket connected synchronously)
     if (socket.encrypted) {
@@ -114,19 +195,41 @@ function waitForSecure(socket: tls.TLSSocket): Promise<void> {
       return
     }
 
+    let settled = false
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        cleanup()
+        reject(new Error(`TLS handshake timeout (${timeoutMs}ms)`))
+      }
+    }, timeoutMs)
+
     const onSecure = () => {
-      cleanup()
-      resolve()
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        cleanup()
+        resolve()
+      }
     }
 
     const onError = (err: Error) => {
-      cleanup()
-      reject(err)
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        cleanup()
+        reject(err)
+      }
     }
 
     const onClose = () => {
-      cleanup()
-      reject(new Error('TLS socket closed during handshake'))
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        cleanup()
+        reject(new Error('TLS socket closed during handshake'))
+      }
     }
 
     const cleanup = () => {

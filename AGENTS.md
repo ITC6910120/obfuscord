@@ -14,22 +14,26 @@ bun run start        # build + launch via `electron .`
 
 | File | Role | Depends on |
 |------|------|-----------|
-| `index.ts` | Entrypoint — Electron main process, proxy config, window creation | `src/ca.ts`, `src/local-proxy.ts` |
+| `index.ts` | Entrypoint — Electron main process, proxy config, window creation | `src/ca.ts`, `src/local-proxy.ts`, `src/pinner.ts` |
 | `src/ca.ts` | In-memory Root CA + per-domain cert generator (node-forge) | — |
 | `src/local-proxy.ts` | HTTP CONNECT proxy on random localhost port | `src/terminator.ts` |
-| `src/terminator.ts` | TLS termination bridge — server-side TLS (to Chromium) ↔ client-side TLS (to Discord, **no SNI**) | `src/ca.ts`, `src/doh-resolver.ts` |
-| `src/doh-resolver.ts` | DNS-over-HTTPS (Cloudflare → Google fallback), IPv4 only | — |
+| `src/pinner.ts` | Certificate pinning — SPKI fingerprint store, verify, pre-fetch | `src/doh-resolver.ts` |
+| `src/terminator.ts` | TLS termination bridge — server-side TLS (to Chromium) ↔ client-side TLS (to Discord, **no SNI**) + pin verification | `src/ca.ts`, `src/doh-resolver.ts`, `src/pinner.ts` |
+| `src/doh-resolver.ts` | DNS-over-HTTPS (Cloudflare → Google fallback), **in-memory DNS cache (TTL-based)**, IPv4 only | — |
 
 ## Critical boot order (must not change)
 
 1. **Module level** — register `certificate-error` handler (line 35 of index.ts)
 2. `initCa()` — generate in-memory Root CA
-3. `startProxy()` — start local proxy, returns `{port, close}`
-4. `app.whenReady()` — Electron ready
-5. `session.defaultSession.setProxy(...)` — **must** happen after `whenReady()`
-6. `createWindow()` — loads `https://discord.com/app`
+3. `pinAllDiscordDomains()` — pre-fetch cert pins for 6 Discord domains (async, non-blocking)
+4. `startProxy()` — start local proxy, returns `{port, close}`
+5. `app.whenReady()` — Electron ready
+6. `session.defaultSession.setProxy(...)` — **must** happen after `whenReady()`
+7. `createWindow()` — loads `https://discord.com/app`
 
-The `certificate-error` handler **must** be at module scope to catch early events. `initCa()` must precede `startProxy()` because incoming CONNECT requests immediately call `signCert()`.
+The `certificate-error` handler **must** be at module scope to catch early events. `initCa()` must precede `startProxy()` because incoming CONNECT requests immediately call `signCert()`. `pinAllDiscordDomains()` runs in parallel with `startProxy()` — if a connection arrives before pinning finishes, TOFU handles it.
+
+Both `certificate-error` and `setCertificateVerifyProc` now verify the certificate's **issuerName** against our CA (`getCaName()`), replacing the previous blanket-accept.
 
 ## Toolchain quirks
 
@@ -41,8 +45,8 @@ The `certificate-error` handler **must** be at module scope to catch early event
 ## Known limitations
 
 - **IPv4 only** — DoH resolver queries type A only. Discord over IPv6 will fail.
-- **`checkServerIdentity` overridden** — `terminator.ts` line 77 sets `() => undefined`, bypassing server cert hostname check.
-- **No timeouts** — proxy/TLS connections can hang indefinitely.
+- **`checkServerIdentity` overridden** — `terminator.ts` `tlsConnect()` sets `() => undefined`, bypassing server cert hostname check. **Mitigated by Certificate Pinning** (`src/pinner.ts`) which verifies the server's SPKI fingerprint after handshake.
+- **TOFU risk** — Certificate pinning uses Trust-On-First-Use: the first connection to each domain stores the pin. An attacker on the network during the very first boot could compromise the pin.
 - **No connection pooling** — every request opens a new TLS socket.
 - **Hardcoded Discord domains** — see `doh-resolver.ts` lines 111–118.
 - **No tests exist** — any change needs manual verification.
