@@ -63,6 +63,10 @@ async function createWindow(): Promise<BrowserWindow> {
     },
   })
 
+  // 🔒 Protect window content from remote desktop / screenshot / screen recording
+  //    Uses OS-level API: SetWindowDisplayAffinity (Windows) / NSWindowSharingNone (macOS)
+  win.setContentProtection(true)
+
   // Allow only permissions Discord actually needs (notifications, media, fullscreen, clipboard).
   // Allowed automatically — no popup — because the renderer is sandboxed and trusted only for Discord.
 
@@ -198,8 +202,21 @@ async function main(): Promise<void> {
           return
         }
 
+        // Filter out our own Discord window from the picker.
+        // Content protection (setContentProtection) makes its thumbnail black,
+        // which would confuse users. We match by window title (set by the web app).
+        const filteredSources = sources.filter(s => {
+          if (s.id.startsWith('screen:')) return true   // Keep all screens
+          const name = s.name.toLowerCase()
+          return !name.includes('discord')               // Exclude Discord windows
+        })
+        if (filteredSources.length === 0) {
+          callback({ video: undefined, audio: undefined })
+          return
+        }
+
         // Open a small picker window for the user to choose.
-        const source = await showPicker(sources)
+        const source = await showPicker(filteredSources)
 
         if (!source) {
           // User cancelled — send empty stream so Discord closes the share prompt
