@@ -5,7 +5,8 @@
   "scripts": {
     "build": "bun build --target node --external electron --outdir dist index.ts",
     "start": "bun run build && electron .",
-    "start:debug": "bun run build && cmd /c \"set DEBUG_PROXY=true && electron .\""
+    "start:debug": "bun run build && cmd /c \"set DEBUG_PROXY=true && electron .\"",
+    "generate:llms": "bun run scripts/generate-llms.ts"
   },
   "private": true,
   "devDependencies": {

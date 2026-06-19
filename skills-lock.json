@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "electron-development": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/electron-development/SKILL.md",
+      "computedHash": "b47faf3ba9d7993e8e46bfc8612e4f0a15961e3356f882b20b9a03d81c652311"
+    },
     "network-engineer": {
       "source": "rmyndharis/antigravity-skills",
       "sourceType": "github",

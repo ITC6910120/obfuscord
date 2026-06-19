@@ -1,0 +1,2523 @@
+# Obfuscord — Full Documentation
+
+> Auto-generated from README.md + docs/ — DO NOT EDIT MANUALLY
+> Generated: 2026-06-19T00:56:59.223Z
+
+---
+<!-- START: README.md -->
+---
+
+# Obfuscord — Discord Obfuscated Desktop Client
+
+Desktop client สำหรับ Discord ที่ **อำพรางการสื่อสารในระดับเครือข่าย** โดยใช้เทคนิค Man-in-the-Middle (MITM) TLS proxy ที่ทำงานทั้งหมดในหน่วยความจำ (In-Memory) โดยไม่ทิ้งร่องรอยบนดิสก์
+
+---
+
+## Quick Start
+
+```bash
+bun install
+bun run build     # bundle → dist/index.js (single-file)
+bun run start     # build + launch via `electron .`
+```
+
+---
+
+## แนวคิด
+
+Obfuscord ใช้ **Self-MITM Proxy** — สร้าง MITM proxy ขึ้นมาเองในเครื่อง:
+
+1. **In-Memory Root CA** — Certificate Authority ใน RAM (ไม่แตะดิสก์)
+2. **Local Proxy** — HTTP CONNECT proxy ที่ `localhost:random`
+3. **TLS Termination** — ถอด TLS จาก Chromium → สร้าง TLS ใหม่ไปยัง Discord **โดยไม่ส่ง SNI**
+4. **Certificate Pinning** — ตรวจสอบ SPKI fingerprint ป้องกัน MITM
+
+**ผลลัพธ์:** เครือข่ายเห็นแค่ TLS ไปยัง IP Cloudflare โดยไม่มี SNI → ไม่รู้ target
+
+---
+
+## Tech Stack
+
+| เทคโนโลยี          | เวอร์ชัน | บทบาท                       |
+| ------------------ | -------- | --------------------------- |
+| **Bun**            | 1.3.14+  | Runtime + Bundler           |
+| **Electron**       | 42.4.1   | Chromium wrapper            |
+| **TypeScript**     | 5.x      | ภาษา                        |
+| **node-forge**     | 1.4.0    | Pure JS crypto (RSA, X.509) |
+| **Cloudflare DoH** | —        | DNS resolution หลัก         |
+| **Google DoH**     | —        | DNS resolution สำรอง        |
+
+---
+
+## เอกสารอ้างอิง (Documentation)
+
+| เอกสาร                                                             | รายละเอียด                                                       |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| [docs/architecture.md](docs/architecture.md)                       | สถาปัตยกรรมโดยรวม + Tech Stack + Dependency                      |
+| [docs/boot-sequence.md](docs/boot-sequence.md)                     | ลำดับการบู๊ต (Critical — ห้ามเปลี่ยน)                            |
+| [docs/connection-flow.md](docs/connection-flow.md)                 | การเชื่อมต่อ 1 ครั้งทำงานอย่างไร                                 |
+| [docs/security-model.md](docs/security-model.md)                   | ความปลอดภัย — Certificate Verify, Permission, Content Protection |
+| [docs/limitations.md](docs/limitations.md)                         | ข้อจำกัดของระบบ                                                  |
+| [docs/development.md](docs/development.md)                         | คู่มือพัฒนา — Setup, Build, Debug, Toolchain                     |
+| [docs/components/ca.md](docs/components/ca.md)                     | In-Memory CA (Root CA + signCert)                                |
+| [docs/components/local-proxy.md](docs/components/local-proxy.md)   | HTTP CONNECT Proxy                                               |
+| [docs/components/terminator.md](docs/components/terminator.md)     | TLS Termination Bridge (หัวใจของระบบ)                            |
+| [docs/components/doh-resolver.md](docs/components/doh-resolver.md) | DNS-over-HTTPS                                                   |
+| [docs/components/pinner.md](docs/components/pinner.md)             | Certificate Pinning (SPKI + TOFU)                                |
+| [docs/components/picker.md](docs/components/picker.md)             | Screen Sharing Picker UI                                         |
+
+---
+
+## โครงสร้างโปรเจค
+
+```
+obfuscord/
+├── index.ts              # Entry point — Electron main process
+├── src/
+│   ├── ca.ts             # In-memory Root CA + cert signing
+│   ├── doh-resolver.ts   # DNS-over-HTTPS
+│   ├── local-proxy.ts    # HTTP CONNECT proxy
+│   ├── pinner.ts         # Certificate pinning
+│   ├── terminator.ts     # TLS termination bridge (core)
+│   └── picker.ts         # Screen sharing picker UI
+├── docs/                 # เอกสารทั้งหมด
+│   ├── architecture.md
+│   ├── boot-sequence.md
+│   ├── connection-flow.md
+│   ├── security-model.md
+│   ├── limitations.md
+│   ├── development.md
+│   └── components/
+│       ├── ca.md
+│       ├── local-proxy.md
+│       ├── terminator.md
+│       ├── doh-resolver.md
+│       ├── pinner.md
+│       └── picker.md
+├── dist/index.js         # Build output (~530KB)
+├── package.json
+├── tsconfig.json
+├── AGENTS.md             # Instruction for OpenCode agents
+└── README.md             # (ไฟล์นี้)
+```
+
+---
+
+## ข้อควรทราบ
+
+โปรเจคนี้เป็น **experimental / proof-of-concept** — มีข้อจำกัดที่ควรทราบ:
+
+- **IPv4 only** — DoH query type A เท่านั้น
+- **TOFU Risk** — การเชื่อมต่อครั้งแรกสุ่มเสี่ยงต่อ MITM
+- **No Connection Pooling** — ทุก request สร้าง TLS socket ใหม่
+- **Hardcoded Domains** — 6 Discord domains ต้องอัปเดตเอง
+- **No Tests** — เปลี่ยนโค้ดต้อง manual test
+
+ดูรายละเอียดเพิ่มเติม: [docs/limitations.md](docs/limitations.md)
+
+---
+
+## เครดิต
+
+พัฒนาโดย [ITC6910120](https://github.com/ITC6910120) — OpenCode agent `@build` ตามหลัก Clean Code 6 ข้อ
+
+
+---
+<!-- START: docs/architecture.md -->
+---
+
+# สถาปัตยกรรมโดยรวม
+
+## สารบัญ
+- [แนวคิดและที่มา](#แนวคิดและที่มา)
+- [สถาปัตยกรรมโดยรวม](#สถาปัตยกรรมโดยรวม)
+- [ผัง Dependency](#ผัง-dependency)
+- [เทคโนโลยีที่ใช้](#เทคโนโลยีที่ใช้)
+- [โครงสร้างโปรเจค](#โครงสร้างโปรเจค)
+- [Cross-reference](#cross-reference)
+
+---
+
+## แนวคิดและที่มา
+
+### ปัญหาที่ต้องการแก้
+
+การเชื่อมต่อไปยัง Discord โดยปกติจะ:
+1. ส่ง **Server Name Indication (SNI)** ซึ่งระบุ `discord.com` ใน TLS handshake → ผู้ให้บริการเครือข่ายเห็น target domain ทันที
+2. ใช้ **ระบบ DNS ของเครื่อง** ซึ่งอาจถูกแทรกแซง (DNS hijacking) หรือถูกบล็อก (DNS poisoning)
+3. ใช้ **Root CA ของระบบ** เพื่อตรวจสอบใบรับรอง → หน่วยงานหรือมัลแวร์ที่สามารถติดตั้ง CA ลงในเครื่องสามารถ MITM ได้อยู่แล้ว
+
+### แนวทางแก้
+
+โปรเจคนี้ใช้แนวคิด **"Self-MITM Proxy"** หรือการสร้าง MITM proxy ขึ้นมาเองในเครื่อง:
+
+1. **In-Memory Root CA** — สร้าง Certificate Authority ขึ้นมาเองในหน่วยความจำ (ไม่เคยแตะดิสก์)
+2. **Local Proxy** — เปิด HTTP CONNECT proxy ที่ `localhost` แบบ random port
+3. **บังคับ Chromium** (ผ่าน Electron) ให้ใช้ proxy นี้
+4. **Terminate TLS** — ถอดรหัส TLS จาก Chromium แล้วสร้าง TLS ใหม่ไปยัง Discord
+5. **ไม่มี SNI** — TLS handshake รอบที่สอง (ไปยัง Discord) **ไม่ส่ง SNI** ทำให้เครือข่ายไม่รู้ target
+
+**ผลลัพธ์:** เครือข่ายเห็นแค่ TLS ไปยัง IP ของ Cloudflare โดยไม่มี SNI → ไม่สามารถระบุได้ว่ากำลังเชื่อมต่อไปยัง Discord
+
+---
+
+## สถาปัตยกรรมโดยรวม
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        YOUR COMPUTER                                     │
+│                                                                          │
+│  ┌──────────────────────────────────────────┐                            │
+│  │           Electron / Chromium            │                            │
+│  │                                          │                            │
+│  │  https://discord.com/app                 │                            │
+│  │         │                                │                            │
+│  │         │  HTTP CONNECT                  │                            │
+│  │         │  discord.com:443               │                            │
+│  └─────────┼────────────────────────────────┘                            │
+│            │                                                             │
+│            ▼                                                             │
+│  ┌──────────────────────────────────────────┐                            │
+│  │         local-proxy.ts                   │                            │
+│  │   (localhost:XXXXX random port)          │                            │
+│  │                                          │                            │
+│  │  TCP socket → terminator.ts              │                            │
+│  └─────────┼────────────────────────────────┘                            │
+│            │                                                             │
+│            ▼                                                             │
+│  ┌──────────────────────────────────────────┐                            │
+│  │         terminator.ts                    │                            │
+│  │                                          │                            │
+│  │  1. signCert("discord.com") ← ca.ts     │                            │
+│  │  2. 200 Connection Established           │                            │
+│  │  3. Server-side TLS (with Chromium)      │                            │
+│  │  4. resolveA("discord.com") ← doh.ts     │◄─── Cloudflare DoH        │
+│  │  5. tlsConnect(IP, 443) — NO SNI!       │                            │
+│  │  6. verifyPin("discord.com", cert)      │                            │
+│  │     ← pinner.ts                          │                            │
+│  │  7. Pipe HTTP/2 data                     │                            │
+│  └─────────┼────────────────────────────────┘                            │
+│            │                                                             │
+└────────────┼─────────────────────────────────────────────────────────────┘
+             │
+             │  TLS to Cloudflare IP, no SNI
+             │  (looks like generic Cloudflare traffic)
+             ▼
+┌──────────────────────────────────────────┐
+│           Discord (via Cloudflare)       │
+│  gateway.discord.gg                      │
+│  discord.com                             │
+└──────────────────────────────────────────┘
+```
+
+---
+
+## ผัง Dependency
+
+```
+index.ts               # Entry point — Electron main process
+├── src/ca.ts          # Certificate generation (Root CA + signCert)
+├── src/local-proxy.ts
+│   └── src/terminator.ts
+│       ├── src/ca.ts              ← signCert()
+│       ├── src/doh-resolver.ts    ← resolveA()
+│       └── src/pinner.ts          ← verifyPin()
+├── src/pinner.ts       # pinAllDiscordDomains()
+├── src/picker.ts       # Screen sharing picker UI
+└── electron            # (devDependency, external in bundle)
+```
+
+### ตาราง Dependency
+
+| ไฟล์ | ขึ้นอยู่กับ | ถูกเรียกจาก |
+|------|-----------|-----------|
+| `index.ts` | `ca.ts`, `local-proxy.ts`, `pinner.ts`, `picker.ts` | — |
+| `src/ca.ts` | `node-forge` | `index.ts`, `terminator.ts` |
+| `src/local-proxy.ts` | `terminator.ts` | `index.ts` |
+| `src/terminator.ts` | `ca.ts`, `doh-resolver.ts`, `pinner.ts` | `local-proxy.ts` |
+| `src/doh-resolver.ts` | — | `terminator.ts`, `pinner.ts` |
+| `src/pinner.ts` | `doh-resolver.ts` | `index.ts`, `terminator.ts` |
+| `src/picker.ts` | Electron `BrowserWindow` | `index.ts` |
+
+---
+
+## เทคโนโลยีที่ใช้
+
+| เทคโนโลยี | เวอร์ชัน | บทบาท |
+|-----------|---------|--------|
+| **Bun** | 1.3.14+ | Runtime + Bundler (ไม่ใช้ tsc) |
+| **Electron** | 42.4.1 | Chromium wrapper สำหรับ desktop app |
+| **TypeScript** | 5.x | ภาษา + type checking |
+| **node-forge** | 1.4.0 | Pure JS crypto (RSA, X.509, PEM) |
+| **Cloudflare DoH** | — | DNS resolution หลัก |
+| **Google DoH** | — | DNS resolution สำรอง |
+
+---
+
+## โครงสร้างโปรเจค
+
+```
+obfuscord/
+├── index.ts                  # Entry point — Electron main process
+├── src/
+│   ├── ca.ts                 # In-memory Root CA + cert signing
+│   ├── doh-resolver.ts       # DNS-over-HTTPS (Cloudflare → Google)
+│   ├── local-proxy.ts        # HTTP CONNECT proxy
+│   ├── pinner.ts             # Certificate pinning (SPKI fingerprint)
+│   ├── terminator.ts         # TLS termination bridge (core logic)
+│   └── picker.ts             # Screen/window picker UI
+├── dist/
+│   └── index.js              # Build output (~530KB, single-file)
+├── docs/
+│   ├── architecture.md       # (ไฟล์นี้)
+│   ├── boot-sequence.md      # ลำดับการบู๊ต
+│   ├── connection-flow.md    # ขั้นตอนการเชื่อมต่อ 1 ครั้ง
+│   ├── security-model.md     # ความปลอดภัย
+│   ├── limitations.md        # ข้อจำกัด
+│   ├── development.md        # คู่มือพัฒนาต่อ
+│   └── components/           # รายละเอียดแต่ละ component
+│       ├── ca.md
+│       ├── doh-resolver.md
+│       ├── local-proxy.md
+│       ├── terminator.md
+│       ├── pinner.md
+│       └── picker.md
+├── package.json              # "main": "dist/index.js"
+├── tsconfig.json             # noEmit: true, bundler mode
+├── bun.lock                  # Bun lockfile v1
+├── AGENTS.md                 # Instruction สำหรับ OpenCode agent
+└── README.md                 # ภาพรวมระดับสูง + Quick Start
+```
+
+---
+
+## Cross-reference
+
+- [boot-sequence.md](boot-sequence.md) — ลำดับการบู๊ตที่ห้ามเปลี่ยน
+- [connection-flow.md](connection-flow.md) — การเชื่อมต่อ 1 ครั้งทำงานอย่างไร
+- [components/terminator.md](components/terminator.md) — TLS bridge (หัวใจของระบบ)
+- [components/ca.md](components/ca.md) — In-memory CA
+- [components/pinner.md](components/pinner.md) — Certificate pinning
+
+
+---
+<!-- START: docs/boot-sequence.md -->
+---
+
+# ลำดับการบู๊ต (Boot Sequence)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [Critical Boot Order](#critical-boot-order)
+- [รายละเอียดแต่ละขั้นตอน](#รายละเอียดแต่ละขั้นตอน)
+- [หมายเหตุสำคัญ](#หมายเหตุสำคัญ)
+- [App Lifecycle](#app-lifecycle)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+ลำดับการบู๊ตของ Obfuscord ถูกออกแบบให้แต่ละขั้นตอนขึ้นต่อกัน (sequential dependencies) — การเปลี่ยนลำดับอาจทำให้ระบบทำงานผิดพลาด
+
+---
+
+## Critical Boot Order
+
+```
+เวลา  ┌─────────────────────────────────────────────────┐
+│     │ Module scope                                    │
+│     │  • app.on('certificate-error') ← register ก่อน  │
+│     │    ทุกอย่าง (Electron event อาจมาก่อน ready)    │
+│     ├─────────────────────────────────────────────────┤
+│     │ bootstrap()                                     │
+│     │  1. initCa() ← สร้าง Root CA                    │
+│     │     └─ ต้องมาก่อน startProxy()                  │
+│     │                                                │
+│     │  2. startProxy() ← เปิด proxy                   │
+│     │     └─ localhost:random                         │
+│     │                                                │
+│     │  3. pinAllDiscordDomains() (async)              │
+│     │     └─ pre-fetch SPKI fingerprint               │
+│     │        (non-blocking, คู่ขนานกับ proxy)         │
+│     ├─────────────────────────────────────────────────┤
+│     │ app.whenReady()                                 │
+│     │  └─ Electron พร้อมใช้งาน                        │
+│     ├─────────────────────────────────────────────────┤
+│     │ session.defaultSession.setProxy()               │
+│     │  └─ ตั้งค่าให้ Chromium ใช้ proxy ของเรา         │
+│     │    ★ ต้องหลัง whenReady() ★                    │
+│     ├─────────────────────────────────────────────────┤
+│     │ setCertificateVerifyProc()                      │
+│     │  └─ ตรวจสอบ issuerName ของ cert                 │
+│     ├─────────────────────────────────────────────────┤
+│     │ setDisplayMediaRequestHandler()                 │
+│     │  └─ สำหรับ screen sharing                       │
+│     ├─────────────────────────────────────────────────┤
+│     │ createWindow()                                  │
+│     │  └─ เปิด https://discord.com/app                │
+│     ▼                                                │
+```
+
+---
+
+## รายละเอียดแต่ละขั้นตอน
+
+### 1. Module Scope — certificate-error handler
+
+```typescript
+// index.ts — module level (บรรทัด 40)
+app.on('certificate-error', (event, _webContents, _url, _error, certificate, callback) => {
+  if (certificate?.issuerName?.includes(getCaName())) {
+    event.preventDefault()
+    callback(true)   // Accept — cert มาจาก CA ของเรา
+  } else {
+    callback(false)  // Reject
+  }
+})
+```
+
+**ทำไมต้อง module level:** Electron อาจ emit event นี้ก่อน `app.whenReady()` — ต้อง register ไว้ตั้งแต่ต้น
+
+### 2. initCa() — สร้าง Root CA
+
+```typescript
+initCa()  // index.ts บรรทัด 135 (ใน bootstrap())
+```
+
+- สร้าง RSA 2048-bit key pair + self-signed certificate
+- เก็บใน `caContext` (module-level variable)
+- **ต้องมาก่อน `startProxy()`** — เพราะเมื่อ Chromium ส่ง CONNECT มา `signCert()` จะถูกเรียกทันที
+
+### 3. startProxy() — เปิด proxy
+
+```typescript
+const { port, close } = await startProxy()
+stopProxy = close
+```
+
+- เปิด TCP server บน `127.0.0.1:random`
+- คืนค่า port + close function
+- หลังจากนี้ Chromium สามารถเชื่อมต่อผ่าน proxy ได้
+
+### 4. pinAllDiscordDomains() (async, non-blocking)
+
+```typescript
+pinAllDiscordDomains()  // index.ts บรรทัด 147
+```
+
+- Pre-fetch SPKI fingerprints สำหรับ 6 Discord domains
+- **ไม่ block boot** — ทำงานใน background
+- ถ้า connection มาก่อน pre-fetch เสร็จ → TOFU จะจัดการ
+
+### 5. app.whenReady()
+
+```typescript
+await app.whenReady()
+```
+
+- Electron internal initialization เสร็จสมบูรณ์
+- `session` พร้อมใช้งาน (ต้องหลัง whenReady)
+
+### 6. setProxy()
+
+```typescript
+await session.defaultSession.setProxy({
+  proxyRules: `http://127.0.0.1:${proxyPort}`,
+  proxyBypassRules: '<local>',
+})
+```
+
+- Chromium กำหนดให้ใช้ proxy ของเรา
+- **ต้องหลัง `whenReady()`** — `session` ยังไม่พร้อมก่อนหน้านั้น
+- `proxyBypassRules: '<local>'` — traffic ภายใน localhost ข้าม proxy
+
+### 7. setCertificateVerifyProc()
+
+```typescript
+session.defaultSession.setCertificateVerifyProc((request, callback) => {
+  if (request.certificate?.issuerName?.includes(caName)) {
+    callback(0)    // Accept — มาจาก CA ของเรา
+  } else {
+    callback(-3)   // ใช้ Chromium default verification
+  }
+})
+```
+
+- ตรวจสอบ cert ที่ Chromium network service ได้รับ
+- callback(0) = trust, callback(-3) = Chromium default (reject self-signed)
+
+### 8. setDisplayMediaRequestHandler()
+
+```typescript
+session.defaultSession.setDisplayMediaRequestHandler(
+  async (request, callback) => { /* ... */ }
+)
+```
+
+- สำหรับ screen sharing
+- เรียก `desktopCapturer.getSources()` → `showPicker()` → callback
+
+### 9. createWindow()
+
+```typescript
+const win = new BrowserWindow({
+  width: 1280,
+  height: 800,
+  webPreferences: {
+    nodeIntegration: false,
+    contextIsolation: true,
+    sandbox: true,
+  },
+})
+win.setContentProtection(true)
+await win.loadURL('https://discord.com/app')
+```
+
+- สร้าง BrowserWindow แบบ sandboxed
+- `setContentProtection(true)` — ป้องกัน screen capture
+- เปิด `https://discord.com/app`
+
+---
+
+## App Lifecycle
+
+### macOS Lifecycle
+
+```typescript
+// ไม่ปิด app เมื่อปิดหน้าต่างทั้งหมด (macOS convention)
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
+
+// สร้างหน้าต่างใหม่เมื่อคลิก dock icon
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    main()
+  }
+})
+```
+
+### Cleanup
+
+```typescript
+app.on('before-quit', () => {
+  stopProxy?.()  // หยุด proxy server
+})
+```
+
+---
+
+## หมายเหตุสำคัญ
+
+| ลำดับ | ข้อควรจำ |
+|-------|---------|
+| 1 | `certificate-error` handler **ต้องอยู่ที่ module level** — อย่า移到 `app.whenReady()` |
+| 2 | `initCa()` **ต้องมาก่อน** `startProxy()` — `signCert()` ถูกเรียกทันทีเมื่อมี CONNECT |
+| 3 | `pinAllDiscordDomains()` เป็น async non-blocking — ทำงานคู่ขนานกับ proxy |
+| 4 | `session.setProxy()` **ต้องหลัง** `app.whenReady()` — `session` ยังไม่พร้อม |
+| 5 | `setContentProtection(true)` ป้องกัน Discord window จาก screen capture |
+| 6 | `bootstrapped` flag ป้องกัน macOS `activate` เรียก bootstrap ซ้ำ |
+
+---
+
+## Cross-reference
+
+- [architecture.md](architecture.md) — ภาพรวมสถาปัตยกรรม
+- [connection-flow.md](connection-flow.md) — หลังจาก boot เสร็จ → การทำงานของ 1 request
+- [components/ca.md](components/ca.md) — `initCa()` และ `signCert()`
+- [components/pinner.md](components/pinner.md) — `pinAllDiscordDomains()`
+
+
+---
+<!-- START: docs/connection-flow.md -->
+---
+
+# การเชื่อมต่อ 1 ครั้ง ทำงานอย่างไร
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [ขั้นตอนโดยละเอียด (15 Steps)](#ขั้นตอนโดยละเอียด-15-steps)
+- [Sequence Diagram เต็ม](#sequence-diagram-เต็ม)
+- [Safety Timeouts](#safety-timeouts)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+เมื่อผู้ใช้เปิด Discord แล้ว Chromium ต้องการโหลด `https://discord.com/app` — คำขอเดียวนี้ต้องผ่านขั้นตอนต่างๆ มากมายตั้งแต่ proxy จนถึง TLS bridge ก่อนที่ข้อมูลจะถึง Discord จริง
+
+---
+
+## ขั้นตอนโดยละเอียด (15 Steps)
+
+| ลำดับ | เกิดอะไรขึ้น | ใครทำ |
+|-------|-------------|-------|
+| 1 | Chromium ตรวจสอบ proxy settings → พบว่าต้องใช้ `http://127.0.0.1:XXXXX` | Electron / Chromium |
+| 2 | Chromium สร้าง TCP connection ไปยัง `127.0.0.1:XXXXX` | OS / net |
+| 3 | Chromium ส่ง `CONNECT discord.com:443 HTTP/1.1` | Chromium → local-proxy.ts |
+| 4 | `local-proxy.ts` อ่าน HTTP headers → ได้ hostname `discord.com` | local-proxy.ts |
+| 5 | เรียก `signCert("discord.com")` → สร้าง RSA key pair + sign cert ด้วย Root CA | ca.ts |
+| 6 | ส่ง `HTTP/1.1 200 Connection Established` กลับไป | terminator.ts |
+| 7 | สร้าง `tls.TLSSocket` ฝั่ง server เพื่อรับ TLS handshake จาก Chromium | terminator.ts |
+| 8 | Chromium ส่ง ClientHello → proxy ส่ง ServerHello + Certificate กลับ | terminator.ts + Chromium |
+| 9 | TLS handshake สำเร็จ → Chromium เริ่มส่ง HTTP/2 requests (plaintext ที่ proxy เห็น) | terminator.ts |
+| 10 | DoH resolver ถาม Cloudflare ว่า `discord.com` IP คืออะไร | doh-resolver.ts |
+| 11 | สร้าง TCP connection ไปยัง IP จริงของ Discord (เช่น `104.16.X.X:443`) | terminator.ts |
+| 12 | `tlsConnect()` — TLS handshake กับ Discord **โดยไม่ส่ง SNI** | terminator.ts |
+| 13 | TLS handshake กับ Discord สำเร็จ | Discord |
+| **13.5** | **★ `verifyPin()` ตรวจสอบ SPKI fingerprint ของ Discord cert เทียบกับ pin → mismatch = reject** | **pinner.ts** |
+| 14 | `serverSide.pipe(serverSide2)` — HTTP/2 data จาก Chromium → Discord | terminator.ts |
+| 15 | `serverSide2.pipe(serverSide)` — HTTP/2 data จาก Discord → Chromium | terminator.ts |
+
+**ผลลัพธ์:** Chromium คุยกับ Discord ได้ปกติ แต่เครือข่ายเห็นแค่ TLS ไปยัง Cloudflare IP โดยไม่มี SNI
+
+---
+
+## Sequence Diagram เต็ม
+
+```
+Chromium                          terminator.ts                      Discord Server
+   │                                    │                                │
+   │──── CONNECT discord.com:443 ──────▶│                                │
+   │                                    │                                │
+   │                                    │── signCert("discord.com")    │
+   │                                    │   (ca.ts)                     │
+   │                                    │                                │
+   │◀── 200 Connection Established ─────│                                │
+   │                                    │                                │
+   │═══ TLS ClientHello ══════════════▶│═══ Server-side TLS ══════════▶│
+   │    (คิดว่า proxy คือ Discord)      │    (isServer: true,           │
+   │                                    │     ใช้ cert ที่ sign ใหม่)  │
+   │                                    │                                │
+   │◀══ Server Hello + Cert ═══════════│                                │
+   │                                    │                                │
+   │═══ Change Cipher Spec ═══════════▶│                                │
+   │◀══ Change Cipher Spec ════════════│                                │
+   │                                    │                                │
+   │              [TLS Established]     │                                │
+   │                                    │                                │
+   │                                    │── resolveA("discord.com")    │
+   │                                    │   (doh-resolver.ts)          │
+   │                                    │   → Cloudflare DoH           │
+   │                                    │   → ["104.16.X.X", ...]      │
+   │                                    │                                │
+   │                                    │── tlsConnect(IP, 443)        │
+   │                                    │    (isServer: false,          │
+   │                                    │     servername: undefined)    │
+   │                                    │    ★ NO SNI ★               │
+   │                                    │                                │
+   │                                    │═══ TLS Handshake ═══════════▶│
+   │                                    │◀══ Certificate + Verify ═════│
+   │                                    │                                │
+   │                                    │── verifyPin("discord.com")   │
+   │                                    │   (pinner.ts)                │
+   │                                    │   → SPKI fingerprint check   │
+   │                                    │                                │
+   │◀══ HTTP/2 plaintext ══════════════│◀══ HTTP/2 plaintext ═════════│
+   │    (ผ่าน .pipe())                  │    (ผ่าน .pipe())             │
+   │════ HTTP/2 plaintext ════════════▶│════ HTTP/2 plaintext ════════▶│
+   │                                    │                                │
+```
+
+---
+
+## Safety Timeouts
+
+| ฟังก์ชัน | ใช้ที่ | Timeout | Default | เกิดอะไรขึ้นเมื่อ timeout |
+|----------|-------|---------|---------|------------------------|
+| `tlsConnect()` | Client-side TLS ไปยัง Discord IP | `timeoutMs` | 15,000 ms | destroy socket + reject promise → log error |
+| `waitForSecure()` | Server-side TLS กับ Chromium | `timeoutMs` | 10,000 ms | reject promise → cleanup socket |
+
+ทั้งสองฟังก์ชันใช้ `settled` flag และ `clearTimeout()` เพื่อป้องกัน **double resolve/reject** — กรณี socket เกิดทั้ง `secureConnect` และ `error` พร้อมกัน จะมีเพียง event แรกเท่านั้นที่ถูกดำเนินการ
+
+---
+
+## Cross-reference
+
+- [boot-sequence.md](boot-sequence.md) — การบู๊ตก่อนหน้าที่ทำให้ระบบพร้อมทำงาน
+- [components/terminator.md](components/terminator.md) — TLS bridge (หัวใจของระบบ)
+- [components/ca.md](components/ca.md) — `signCert()` (Step 5)
+- [components/doh-resolver.md](components/doh-resolver.md) — `resolveA()` (Step 10)
+- [components/pinner.md](components/pinner.md) — `verifyPin()` (Step 13.5)
+
+
+---
+<!-- START: docs/development.md -->
+---
+
+# คู่มือการพัฒนา (Development Guide)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [การติดตั้ง](#การติดตั้ง)
+- [คำสั่งพื้นฐาน](#คำสั่งพื้นฐาน)
+- [Toolchain Quirks](#toolchain-quirks)
+- [Debugging](#debugging)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+Obfuscord ใช้ **Bun** เป็นทั้ง runtime และ bundler (ไม่ใช้ `tsc`) และ **Electron** สำหรับ desktop wrapper
+
+---
+
+## การติดตั้ง
+
+### สิ่งที่ต้องมี
+
+| เครื่องมือ | เวอร์ชัน | หมายเหตุ |
+|-----------|---------|---------|
+| [Bun](https://bun.sh) | 1.3.14+ | Runtime + Bundler |
+| Node.js | (optional) | Bun มี Node.js API compatibility |
+
+### ขั้นตอน
+
+```bash
+# Clone และติดตั้ง dependencies
+git clone <repo-url>
+cd obfuscord
+bun install
+```
+
+หมายเหตุ: `node-forge` และ `electron` อยู่ใน `devDependencies` — ต้องใช้ `bun install` (ไม่ใช่ `bun install --production`)
+
+---
+
+## คำสั่งพื้นฐาน
+
+| คำสั่ง | รายละเอียด |
+|-------|-----------|
+| `bun run index.ts` | Dev mode — Bun รัน `.ts` โดยตรง (ไม่ต้อง build) |
+| `bun run build` | Bundle → `dist/index.js` (ไฟล์เดียว ~525KB) |
+| `bun run start` | Build + เปิดผ่าน `electron .` |
+| `bun run start:debug` | Build + debug mode (`DEBUG_PROXY=true`) + electron |
+
+### Build Command (โดยละเอียด)
+
+```bash
+bun build --target node --external electron --outdir dist index.ts
+```
+
+| Flag | ความหมาย |
+|------|---------|
+| `--target node` | Bundle สำหรับ Node.js environment |
+| `--external electron` | Electron ถูก keep เป็น external (ไม่อยู่ใน bundle) |
+| `--outdir dist` |  output directory |
+
+### การออกจากโปรแกรม
+
+| วิธี | รายละเอียด |
+|------|-----------|
+| ปิดหน้าต่าง | ปกติ (บน macOS แอปไม่ปิด — ต้องปิดจาก Dock) |
+| Ctrl+C | หยุดทุกอย่าง |
+| Cmd+Q (macOS) | ปิดแอปสมบูรณ์ |
+
+---
+
+## Toolchain Quirks
+
+### Bun เป็นทั้ง Runtime และ Bundler
+
+```json
+// tsconfig.json
+{
+  "compilerOptions": {
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true
+  }
+}
+```
+
+- `noEmit: true` — Bun ไม่ใช้ `tsc` สำหรับ compile; Bun รัน `.ts` โดยตรง
+- `moduleResolution: "bundler"` — รองรับ `.js` extension ใน import (`import { foo } from './bar.js'`)
+- `allowImportingTsExtensions: true` — (สำหรับ type-checking)
+- `verbatimModuleSyntax: true` — type import/export ต้องใช้ `type` keyword
+
+### Electron อยู่ใน devDependencies
+
+```json
+{
+  "devDependencies": {
+    "electron": "^42.4.1"
+  }
+}
+```
+
+Electron ถูก keep เป็น external ใน bundle (`--external electron`) → ต้องมี Electron ใน `node_modules` ตอนรัน
+
+### node-forge เป็น Dependency หลัก (เกือบ) เดียว
+
+```json
+{
+  "devDependencies": {
+    "node-forge": "^1.4.0"
+  }
+}
+```
+
+- Pure JavaScript crypto library — **compiles ได้ทุกแพลตฟอร์ม** (ไม่มี native binding)
+- ใช้สำหรับ RSA key generation, X.509 certificate creation, PEM encoding
+
+### TypeScript Strictness
+
+```json
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": false,     // อนุญาต unused variables (ช่วง dev)
+    "noUnusedParameters": false  // อนุญาต unused parameters (Electron callbacks)
+  }
+}
+```
+
+---
+
+## Debugging
+
+### Debug Mode
+
+```bash
+bun run start:debug
+# หรือ
+$env:DEBUG_PROXY="true"; bun run start  # PowerShell
+```
+
+เมื่อ `DEBUG_PROXY=true`:
+- ระบบจะ log รายละเอียด permission ที่ deny
+- verbose logging ใน CA module (`setVerbose(true)`)
+
+### เปิด/ปิด verbose logging
+
+```typescript
+import { setVerbose } from './src/ca.js'
+setVerbose(true)   // เปิด log CA activity
+setVerbose(false)  // ปิด (default)
+```
+
+### ข้อควรระวังในการ Debug
+
+- `setContentProtection(true)` อาจทำให้ screenshot debug tools เห็นหน้าต่างเป็นสีดำ
+- `sandbox: true` จำกัดความสามารถของ devtools ใน renderer
+- ใช้ `console.error` สำหรับ error logging — log ไปยัง terminal (ไม่ใช่ renderer)
+
+---
+
+## Scripts ที่มี
+
+```json
+{
+  "scripts": {
+    "build": "bun build --target node --external electron --outdir dist index.ts",
+    "start": "bun run build && electron .",
+    "start:debug": "bun run build && cmd /c \"set DEBUG_PROXY=true && electron .\""
+  }
+}
+```
+
+หมายเหตุ: `start:debug` ใช้ `cmd /c` (Windows) — สำหรับ macOS/Linux ต้องปรับเป็น `DEBUG_PROXY=true electron .`
+
+---
+
+## Cross-reference
+
+- [architecture.md](architecture.md) — ภาพรวม tech stack
+- [boot-sequence.md](boot-sequence.md) — ลำดับการบู๊ต (critical, ห้ามเปลี่ยน)
+- [security-model.md](security-model.md) — ความปลอดภัยของแอป
+
+
+---
+<!-- START: docs/limitations.md -->
+---
+
+# ข้อจำกัดของระบบ (Known Limitations)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [รายการข้อจำกัด](#รายการข้อจำกัด)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+Obfuscord เป็น proof-of-concept / experimental project ที่มีข้อจำกัดหลายประการที่ควรทราบก่อนนำไปใช้จริง
+
+---
+
+## รายการข้อจำกัด
+
+| # | ข้อจำกัด | ผลกระทบ | สาเหตุ | วิธีแก้ไขเบื้องต้น |
+|---|---------|---------|-------|-----------------|
+| 1 | **IPv4 only** | ถ้า Discord ย้ายเป็น IPv6 ล้วนจะใช้ไม่ได้ | DoH query type A เท่านั้น | เพิ่ม type AAAA query ใน `doh-resolver.ts` |
+| 2 | **checkServerIdentity bypass** | ไม่ตรวจสอบ hostname (ไม่มี SNI) | `() => undefined` ใน `tlsConnect()` | Mitigated โดย Certificate Pinning (`pinner.ts`) |
+| 3 | **TOFU Risk** | การเชื่อมต่อครั้งแรกสุ่มเสี่ยง — ถ้า attacker อยู่บน network ในจังหวะนั้น, pin ที่เก็บจะเป็นของ attacker | pre-fetch async อาจยังไม่เสร็จเมื่อ request แรกมา | Hardcode initial pins หรือ implement delayed verification |
+| 4 | **ไม่มี Connection Pooling** | ทุก request สร้าง TLS socket ใหม่ → latency + overhead | ใช้ `new tls.TLSSocket()` ทุกครั้ง | Implement connection reuse หรือ socket pool |
+| 5 | **Hardcoded Domains** | ถ้า Discord เปลี่ยน domain structure ต้องอัปเดตเอง | รายชื่อใน `doh-resolver.ts` | ย้ายเป็น configurable list หรือ auto-discover |
+| 6 | **ไม่มี Tests** | เปลี่ยนโค้ดแล้วต้อง manual test ทุกครั้ง | ไม่มี test framework/config | เพิ่ม test framework (vitest, node:test) |
+| 7 | **RSA Key Generation Cost** | CPU spike ตอน signCert() (~2-5ms ต่อ cert) | RSA 2048-bit key generation | เปลี่ยนเป็น ECDSA P-256 (เร็วกว่า ~10x) |
+| 8 | **No ALPN Setting** | อาจ fallback เป็น HTTP/1.1 แทน HTTP/2 | ไม่ได้ระบุ `ALPNProtocols` | เพิ่ม `ALPNProtocols: ['h2', 'http/1.1']` |
+| 9 | **No Pin Rotation** | ถ้า Discord เปลี่ยน key pair → connection reject | pin ถูกเก็บ forever | เพิ่ม TTL pin + multiple backup pins |
+| 10 | **WebSocket Gateway Testing** | ยังไม่ได้รับการทดสอบว่า bridge รองรับ WebSocket จริงหรือไม่ | — | Manual testing กับ Discord gateway |
+
+### รายละเอียดข้อจำกัดสำคัญ
+
+#### 1. IPv4 Only
+- `doh-resolver.ts` query type A (IPv4) เท่านั้น
+- Discord ใช้ Cloudflare ซึ่งรองรับทั้ง IPv4 และ IPv6
+- ถ้า ISP ให้เฉพาะ IPv6 หรือ Discord ย้ายเป็น IPv6 ล้วน — ระบบจะ fail
+
+#### 2. checkServerIdentity bypass
+```typescript
+// terminator.ts
+checkServerIdentity: () => undefined
+```
+- `tls.connect()` bypass การตรวจสอบ hostname เพราะไม่มี SNI
+- **แต่ได้รับการป้องกันด้วย Certificate Pinning** — `verifyPin()` ตรวจสอบ SPKI fingerprint หลัง handshake
+- ถ้า pinning ถูก bypass (TOFU attack) → ระบบไม่มีการป้องกัน hostname
+
+#### 3. TOFU Risk
+- `pinAllDiscordDomains()` ทำงานแบบ **async (non-blocking)**
+- ถ้า Chromium เชื่อมต่อก่อน pre-fetch เสร็จ → `verifyPin()` จะ TOFU
+- Attacker ที่ MITM ตั้งแต่ boot ครั้งแรก → compromised ตลอดไป (pin เก็บของ attacker)
+
+#### 4. No Connection Pooling
+- Chromium เปิดหลาย connection แบบ parallel (ปกติ ~6 ต่อ domain)
+- แต่ละ connection ต้องผ่าน `terminateTls()` → server TLS → DoH → client TLS → verify
+- Overhead สูงโดยเฉพาะตอนโหลด assets จำนวนมาก
+
+---
+
+## Cross-reference
+
+- [security-model.md](security-model.md) — รายละเอียดมาตรการป้องกันข้อจำกัด
+- [components/pinner.md](components/pinner.md) — TOFU, pinning mechanism
+- [components/doh-resolver.md](components/doh-resolver.md) — IPv4, hardcoded domains
+- [development.md](development.md) — การ setup environment, build, test
+
+
+---
+<!-- START: docs/security-model.md -->
+---
+
+# Security Model (รูปแบบความปลอดภัย)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [จุดแข็ง](#จุดแข็ง)
+- [Certificate Verification](#certificate-verification)
+- [Permission Handlers](#permission-handlers)
+- [Content Protection](#content-protection)
+- [Sandboxed Renderer](#sandboxed-renderer)
+- [Certificate Pinning](#certificate-pinning)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+Obfuscord มีมาตรการรักษาความปลอดภัยหลายชั้น (defense in depth) ทั้งในระดับเครือข่าย (TLS, DNS, proxy) และระดับแอปพลิเคชัน (Electron security hardening)
+
+---
+
+## จุดแข็ง
+
+| ด้าน | รายละเอียด |
+|------|-----------|
+| **No SNI** | การเข้ารหัสสำคัญที่สุด — ไม่มี SNI ใน ClientHello → DPI ไม่รู้ target |
+| **In-Memory CA** | ไม่มี certificate file บนดิสก์ → forensic trace น้อยมาก |
+| **DoH + DNS Cache** | DNS resolution ปลอดภัยจาก hijacking/poisoning + cache ลด latency |
+| **Certificate Pinning** | ตรวจสอบ SPKI fingerprint หลัง TLS handshake — ป้องกัน MITM แม้ไม่มี SNI |
+| **Certificate Verification (CA Check)** | `setCertificateVerifyProc` และ `certificate-error` ตรวจสอบ issuerName ว่า cert มาจาก CA ของเราเท่านั้น |
+| **Sandboxed Renderer** | Chromium sandbox + context isolation + nodeIntegration ปิด |
+| **Minimal Dependencies** | พึ่งพาแค่ `node-forge` + `electron` — attack surface เล็ก |
+| **Dual Verification** | ทั้ง `certificate-error` (Electron event) และ `setCertificateVerifyProc` (Chromium network service) ป้องกันกัน |
+| **Content Protection** | `setContentProtection(true)` — ป้องกัน OS-level screen capture |
+
+---
+
+## Certificate Verification
+
+### กลไกตรวจสอบ certificate แบบ 2 ชั้น
+
+#### ชั้นที่ 1: `certificate-error` (Electron Event)
+
+```typescript
+app.on('certificate-error', (event, _webContents, _url, _error, certificate, callback) => {
+  if (certificate?.issuerName?.includes(getCaName())) {
+    event.preventDefault()
+    callback(true)   // ✅ Accept — cert มาจาก CA ของเรา
+  } else {
+    callback(false)  // ❌ Reject
+  }
+})
+```
+
+- Electron event ที่ fire เมื่อ Chromium พบ certificate error
+- Accept **เฉพาะ** cert ที่ issuerName ตรงกับ CA ของเรา
+- `preventDefault()` + `callback(true)` = trust cert
+- **ป้องกัน:** attacker ที่ปล่อย cert ผ่าน proxy ของเรา
+
+#### ชั้นที่ 2: `setCertificateVerifyProc` (Chromium Network Service)
+
+```typescript
+session.defaultSession.setCertificateVerifyProc((request, callback) => {
+  if (request.certificate?.issuerName?.includes(caName)) {
+    callback(0)    // ✅ Accept — มาจาก CA ของเรา
+  } else {
+    callback(-3)   // ❌ ใช้ Chromium default verification
+  }
+})
+```
+
+- Hooks เข้าไปใน Chromium network service (แยก process)
+- callback(0) = trust cert
+- callback(-3) = Chromium default verification (reject self-signed cert ที่ไม่ใช่ CA ของเรา)
+- **ป้องกัน:** cert ที่ไม่ใช่ของ CA เราแต่ผ่าน proxy มายังโดน Chromium reject
+
+#### ทำไมต้องมี 2 ชั้น?
+
+```
+certificate-error (Electron main process)
+  └── รับ event เมื่อ Chromium พบ certificate error
+      → ป้องกัน cert error dialog ที่อาจเกิดขึ้นเร็ว
+
+setCertificateVerifyProc (Chromium network service process)
+  └── ตรวจสอบทุก cert ที่ Chromium network service ได้รับ
+      → ป้องกัน cert ที่รั่วไหลผ่าน pathway อื่น
+```
+
+### หมายเหตุเกี่ยวกับ `issuerName.includes()`
+
+```typescript
+// ตรวจสอบ string แบบ includes (ไม่ใช่ exact match)
+certificate?.issuerName?.includes(getCaName())
+```
+
+- `getCaName()` คืนค่า `"Discord Obfuscated Proxy CA"`
+- `includes()` — มีความเสี่ยง false positive ถ้ามี CA อื่นที่มีชื่อคล้ายกัน
+- แต่ในทางปฏิบัติ cert ที่ผ่าน proxy ควรเป็น cert ที่เราสร้างเองเท่านั้น
+
+---
+
+## Permission Handlers
+
+### Permission Request Handler
+
+```typescript
+win.webContents.session.setPermissionRequestHandler(
+  (_webContents, permission, callback) => {
+    const allowed = [
+      'display-capture',   // Screen sharing
+      'speaker-selection', // Audio output selection
+      'media',
+      'notifications',
+      'fullscreen',
+      'clipboard-read',
+      'clipboard-sanitized-write',
+    ]
+    callback(allowed.includes(permission))
+  },
+)
+```
+
+**สิทธิ์ที่ Discord ได้รับ:**
+
+| Permission | เหตุผล |
+|-----------|--------|
+| `display-capture` | Screen sharing |
+| `speaker-selection` | เลือกอุปกรณ์เสียง |
+| `media` | กล้องและไมโครโฟน (voice/video call) |
+| `notifications` | การแจ้งเตือน |
+| `fullscreen` | โหมดเต็มจอ |
+| `clipboard-read` | แปะลิงก์/ข้อความ |
+| `clipboard-sanitized-write` | คัดลอกข้อความ |
+
+**สิทธิ์ที่ถูกปฏิเสธ:** `geolocation`, `midi`, `usb`, `serial`, `bluetooth`, `hid` — Discord ไม่จำเป็นต้องใช้
+
+### Permission Check Handler
+
+```typescript
+win.webContents.session.setPermissionCheckHandler(
+  (_webContents, permission, _requestingOrigin) => {
+    const allowed = [ /* same list */ ]
+    const granted = allowed.includes(permission)
+    if (!granted && process.env.DEBUG_PROXY) {
+      console.log('[permission] Denied:', permission)
+    }
+    return granted
+  },
+)
+```
+
+- ต้องมีทั้ง `setPermissionRequestHandler` และ `setPermissionCheckHandler`
+- อันแรกสำหรับ permission request API (`getUserMedia` ฯลฯ)
+- อันที่สองสำหรับ permission check API (`navigator.permissions.query`)
+
+---
+
+## Content Protection
+
+```typescript
+win.setContentProtection(true)
+```
+
+- **Windows:** ใช้ `SetWindowDisplayAffinity` API — window content ถูกป้องกันไม่ให้ถูก screen capture โดยแอปทั่วไป
+- **macOS:** ใช้ `NSWindowSharingNone` — เหมือนกัน
+- **Linux:** อาจไม่ support (แล้วแต่ compositor)
+
+**ผลกระทบ:**
+- Screenshot ทั่วไป (PrintScreen, Snipping Tool) จะเห็นหน้าต่างเป็นสีดำ
+- Screen share ใน Discord (ผ่าน `getDisplayMedia`) — thumbnail จะเป็นสีดำ
+  - ได้ filter ออกจาก picker ใน `index.ts` โดยการเช็ค `s.name.includes('discord')`
+
+---
+
+## Sandboxed Renderer
+
+```typescript
+webPreferences: {
+  nodeIntegration: false,   // Renderer เรียก Node.js API ไม่ได้
+  contextIsolation: true,   // แยก JavaScript context (preload vs renderer)
+  sandbox: true,            // Chromium sandbox (OS-level isolation)
+}
+```
+
+| มาตรการ | ป้องกันอะไร |
+|---------|------------|
+| `nodeIntegration: false` | Renderer process เรียก `require()`, `process`, `fs` ไม่ได้ |
+| `contextIsolation: true` | preload script และ web page มี context แยกกัน |
+| `sandbox: true` | Chromium sandbox จำกัดความสามารถของ renderer process |
+
+---
+
+## Certificate Pinning
+
+ดูรายละเอียดเพิ่มเติมที่ [components/pinner.md](components/pinner.md)
+
+### สรุป
+
+- ตรวจสอบ SPKI fingerprint ของ certificate Discord จริง
+- เทียบกับที่ pre-fetch ไว้ตอน boot (non-blocking)
+- ถ้าไม่ตรง → destroy socket (MITM detected)
+- TOFU fallback สำหรับ domain ที่ยังไม่มี pin
+
+---
+
+## Cross-reference
+
+- [components/pinner.md](components/pinner.md) — Certificate pinning (SPKI, TOFU, pre-fetch)
+- [components/ca.md](components/ca.md) — In-memory CA (การสร้าง cert ที่เรา trust)
+- [boot-sequence.md](boot-sequence.md) — การลงทะเบียน certificate-error handler
+
+
+---
+<!-- START: docs/components/ca.md -->
+---
+
+# In-Memory Certificate Authority (ca.ts)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [Root CA Generation](#root-ca-generation)
+- [Per-Domain Certificate (signCert)](#per-domain-certificate-signcert)
+- [Certificate Cache](#certificate-cache)
+- [Public API](#public-api)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+`ca.ts` ทำหน้าที่สร้างและจัดการ **Certificate Authority และใบรับรองทั้งหมดในหน่วยความจำ (In-Memory)** โดยไม่มีการเขียนไฟล์ลงดิสก์ (ไม่มี `.pem`, `.crt`, `.key`)
+
+**หลักการทำงาน:**
+1. สร้าง Root CA แบบ self-signed ครั้งเดียวก่อน (ตอน `initCa()`)
+2. สร้าง per-domain certificate สำหรับแต่ละ domain ที่ Chromium ร้องขอ (ตอน `signCert()`)
+3. Root CA เซ็น (sign) ใบรับรองของ domain ต่างๆ
+4. Chromium เชื่อถือใบรับรองนี้เพราะผ่าน `certificate-error` handler ใน `index.ts`
+
+**ความปลอดภัย:** ทุกอย่างอยู่ใน RAM เมื่อปิดแอป = certificate หายไป ไม่มีร่องรอย
+
+---
+
+## Root CA Generation
+
+### ฟังก์ชัน: `initCa()`
+
+```
+┌─────────────────────────────────────┐
+│         Root CA Certificate        │
+│                                     │
+│  Subject: CN = Discord Obfuscated  │
+│           Proxy CA                  │
+│  Issuer:  (self-signed)            │
+│  Validity: 10 years                │
+│  Key: RSA 2048-bit                  │
+│                                     │
+│  Extensions:                        │
+│  ├── basicConstraints: CA=true     │
+│  ├── keyUsage: keyCertSign         │
+│  ├── subjectKeyIdentifier          │
+│  └── authorityKeyIdentifier        │
+└─────────────────────────────────────┘
+```
+
+**รายละเอียดทางเทคนิค:**
+- สร้าง RSA 2048-bit key pair (`forge.pki.rsa.generateKeyPair`)
+- สร้าง self-signed X.509 certificate ด้วย `forge.pki.createCertificate()`
+- Validity 10 ปี (สำหรับ 개발/signing เท่านั้น — ไม่ได้ใช้สำหรับ production)
+- บันทึกในตัวแปร `caContext` (module-level private variable)
+- เรียกครั้งเดียวตอน `bootstrap()` ใน `index.ts`
+
+---
+
+## Per-Domain Certificate (signCert)
+
+### ฟังก์ชัน: `signCert(domain: string): CertBundle`
+
+```
+┌─────────────────────────────────────┐
+│   Certificate for discord.com       │
+│                                     │
+│  Subject: CN = discord.com         │
+│  Issuer:  Discord Obfuscated       │
+│           Proxy CA                  │
+│  Validity: 1 hour (cached)         │
+│  Key: RSA 2048-bit                  │
+│                                     │
+│  Extensions:                        │
+│  ├── basicConstraints: CA=false    │
+│  ├── keyUsage: digitalSignature,   │
+│  │              keyEncipherment    │
+│  ├── extKeyUsage: serverAuth       │
+│  └── subjectAltName: DNS:discord   │
+│                      .com          │
+└─────────────────────────────────────┘
+         ↑ signed by Root CA
+```
+
+**รายละเอียดทางเทคนิค:**
+- สร้าง key pair ใหม่ทุกครั้ง (RSA 2048-bit)
+- Serial number ใช้ `Date.now().toString(16)` — ป้องกัน serial ซ้ำ
+- Certificate validity: 1 ชั่วโมง (ค่าเริ่มต้น `CERT_TTL_MS = 60 * 60 * 1000`)
+- extensions:
+  - `basicConstraints: CA=false` — ไม่ใช่ CA
+  - `keyUsage: digitalSignature, keyEncipherment` — สำหรับ server auth
+  - `extKeyUsage: serverAuth` — ใช้เป็น server certificate
+  - `subjectAltName: DNS:domain` — รองรับ SNI (แต่ไม่ได้ใช้)
+
+---
+
+## Certificate Cache
+
+### กลไก: In-Memory Cache พร้อม TTL
+
+```typescript
+interface CacheEntry {
+  bundle: CertBundle   // { key: string, cert: string } (PEM)
+  expires: Date        // เวลาหมดอายุ
+}
+
+const certCache = new Map<string, CacheEntry>()
+const CERT_TTL_MS = 60 * 60 * 1000 // 1 ชั่วโมง
+```
+
+**พฤติกรรม:**
+1. มีการเรียก `signCert("discord.com")`
+2. เช็ค `certCache.get("discord.com")`
+3. ถ้ามี **และยังไม่ expire** → return cached bundle (ไม่ต้อง generate ใหม่)
+4. ถ้าไม่มี **หรือ expire แล้ว** → generate ใหม่ → store cache → return
+
+**ประโยชน์:** Chromium มักเปิดหลาย connection ไปยัง domain เดียวกัน (โดยเฉพาะ CDN) — cache ลดการ generate RSA key pair ซ้ำๆ ~2-5ms ต่อ request
+
+---
+
+## Public API
+
+| ฟังก์ชัน | พารามิเตอร์ | คืนค่า | คำอธิบาย |
+|---------|------------|--------|---------|
+| `initCa()` | — | `void` | สร้าง Root CA ในหน่วยความจำ (เรียกครั้งเดียว) |
+| `getCaName()` | — | `string` | คืนค่า `"Discord Obfuscated Proxy CA"` สำหรับตรวจสอบ issuerName |
+| `signCert(domain)` | `domain: string` | `CertBundle` | สร้างหรือดึง certificate + key สำหรับ domain |
+| `setVerbose(v)` | `v: boolean` | `void` | เปิด/ปิด verbose logging (สำหรับ debug) |
+
+### CertBundle Interface
+
+```typescript
+interface CertBundle {
+  key: string  // PEM-encoded private key
+  cert: string // PEM-encoded certificate
+}
+```
+
+---
+
+## หมายเหตุสำคัญ
+
+1. **RSA 2048-bit** — ปลอดภัย แต่ช้ากว่า ECDSA P-256 ถึง ~10 เท่า สำหรับ key generation
+2. **Serial number ใช้ timestamp** — ไม่ใช่ cryptographic random แต่เพียงพอสำหรับการใช้งานเฉพาะนี้ (unique ต่อ millisecond)
+3. **ใช้ `node-forge`** — pure JavaScript crypto library ไม่ต้อง native binding (compile ได้ทุกแพลตฟอร์ม)
+4. **ไม่มี OCSP/CRL** — ไม่จำเป็นเพราะเป็น self-signed CA สำหรับ MITM ภายในเครื่อง
+
+---
+
+## Cross-reference
+
+- [boot-sequence.md](../boot-sequence.md) — `initCa()` เป็นขั้นตอนแรกของ bootstrap
+- [terminator.md](terminator.md) — `signCert()` ถูกเรียกจาก `terminateTls()` ก่อน `200 Connection Established`
+- [pinner.md](pinner.md) — Certificate pinning ทำงานหลัง TLS handshake ฝั่ง client
+
+
+---
+<!-- START: docs/components/doh-resolver.md -->
+---
+
+# DNS-over-HTTPS Resolver (doh-resolver.ts)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [DoH Providers](#doh-providers)
+- [DNS Cache (In-Memory)](#dns-cache-in-memory)
+- [Discord Domains](#discord-domains)
+- [Public API](#public-api)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+`doh-resolver.ts` ทำหน้าที่ **DNS resolution ผ่าน HTTPS** แทนการใช้ DNS ปกติของระบบปฏิบัติการ
+
+**เหตุผลที่ต้องใช้ DoH:**
+- ป้องกัน **DNS hijacking** — ISP หรือไฟร์วอลล์เปลี่ยน DNS response
+- ป้องกัน **DNS poisoning** — ปลอมแปลง DNS record
+- ป้องกัน **hosts file manipulation** — มัลแวร์แก้ไข `/etc/hosts`
+
+**สถาปัตยกรรม:**
+
+```
+resolveA("discord.com")
+    │
+    ├── In-memory DNS Cache hit?
+    │   ├── Yes → return cached IPs
+    │   └── No → Continue
+    │
+    ├── Cloudflare DoH (Primary)
+    │   GET https://cloudflare-dns.com/dns-query
+    │   ?name=discord.com&type=A
+    │   Accept: application/dns-json
+    │   │
+    │   └── ถ้าล้มเหลว → Google DoH (Fallback)
+    │       GET https://dns.google/resolve
+    │       ?name=discord.com&type=A
+    │
+    └── cache result → return ["104.16.X.X", ...]
+```
+
+---
+
+## DoH Providers
+
+### Primary: Cloudflare
+
+```typescript
+async function resolveViaCloudflare(host: string): Promise<DnsResult> {
+  const url = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`
+  const res = await fetch(url, {
+    headers: { accept: 'application/dns-json' },
+  })
+  if (!res.ok) throw new Error(`Cloudflare DoH returned HTTP ${res.status}`)
+
+  const body: DnsJsonResponse = await res.json()
+  const answers = (body.Answer ?? []).filter((r) => r.type === 1)
+  return { ips: answers.map((r) => r.data), ttl: pickTtl(answers) }
+}
+```
+
+### Fallback: Google
+
+```typescript
+async function resolveViaGoogle(host: string): Promise<DnsResult> {
+  const url = `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Google DoH returned HTTP ${res.status}`)
+
+  const body: DnsJsonResponse = await res.json()
+  const answers = (body.Answer ?? []).filter((r) => r.type === 1)
+  return { ips: answers.map((r) => r.data), ttl: pickTtl(answers) }
+}
+```
+
+### การเลือก TTL
+
+```typescript
+function pickTtl(answers: DnsAnswer[]): number {
+  const ttls = answers
+    .filter((a) => a.TTL !== undefined)
+    .map((a) => a.TTL as number)
+  return ttls.length > 0 ? Math.min(...ttls) : DNS_CACHE_MIN_TTL
+}
+```
+
+เลือก TTL ที่ **น้อยที่สุด** ในบรรดา A-record answers → conservative (กัน cache stale)
+
+---
+
+## DNS Cache (In-Memory)
+
+### Constants
+
+```typescript
+const DNS_CACHE_MIN_TTL = 60   // 1 นาที — ไม่ cache น้อยกว่านี้
+const DNS_CACHE_MAX_TTL = 600  // 10 นาที — ไม่ cache เกินนี้
+```
+
+### Cache Entry
+
+```typescript
+interface CacheEntry {
+  ips: string[]      // IPv4 addresses
+  expiresAt: number  // epoch ms (Date.now() + TTL * 1000)
+}
+
+const dnsCache = new Map<string, CacheEntry>()
+```
+
+### กลไก
+
+```typescript
+function cacheResult(host: string, result: DnsResult): void {
+  const ttl = Math.max(
+    DNS_CACHE_MIN_TTL,
+    Math.min(result.ttl, DNS_CACHE_MAX_TTL),  // clamp TTL
+  )
+  dnsCache.set(host, {
+    ips: result.ips,
+    expiresAt: Date.now() + ttl * 1000,
+  })
+}
+```
+
+### Cache Flow
+
+```
+resolveA("discord.com")
+  │
+  ├── Cache hit (TTL ยังไม่หมด)
+  │   └── return cached.ips (ภายใน 0.01ms)
+  │
+  └── Cache miss (หมดอายุหรือไม่เคยมี)
+      ├── DoH Cloudflare (wait ~50-150ms)
+      ├── cacheResult() → store ใน Map
+      └── return result.ips
+```
+
+**ประโยชน์:** ลด latency ~50-150ms ต่อ request สำหรับ domain เดิม
+
+---
+
+## Discord Domains
+
+### รายชื่อ 6 Domains (hardcoded)
+
+| Domain | การใช้งาน |
+|--------|----------|
+| `discord.com` | Web app หลัก |
+| `cdn.discordapp.com` | Static assets (avatar, emoji, icons) — *cdn.discord.com* ไม่มี (NXDOMAIN) |
+| `media.discordapp.net` | Media proxy (images, embeds) — *cdn.discordapp.net* ไม่มี |
+| `gateway.discord.gg` | WebSocket gateway สำหรับ real-time events |
+| `discord.gg` | Short-link / invite links |
+| `discordapp.com` | Legacy / redirect |
+
+### ฟังก์ชัน Utility: `resolveDiscordDomains()`
+
+```typescript
+export async function resolveDiscordDomains(): Promise<Map<string, string>> {
+  const results = new Map<string, string>()
+  await Promise.allSettled(
+    DISCORD_DOMAINS.map(async (domain) => {
+      const ips = await resolveA(domain)
+      if (ips.length > 0) results.set(domain, ips[0]!)
+    })
+  )
+  return results
+}
+```
+
+resolve ทุก domain แบบ parallel — domain ที่ fail จะถูก skip (ไม่ throw)
+
+---
+
+## Public API
+
+| ฟังก์ชัน | พารามิเตอร์ | คืนค่า | คำอธิบาย |
+|---------|------------|--------|---------|
+| `resolveA(host)` | `host: string` | `Promise<string[]>` | resolve domain → IPv4 addresses (cache-aware) |
+| `resolveDiscordDomains()` | — | `Promise<Map<string, string>>` | resolve ทุก Discord domain แบบ parallel |
+
+---
+
+## ข้อจำกัด
+
+| ข้อจำกัด | รายละเอียด |
+|----------|-----------|
+| **IPv4 only** | Query type A เท่านั้น — ไม่รองรับ AAAA (IPv6) |
+| **Sequential fallback** | ลอง Cloudflare ก่อน → ถ้า fail ค่อยลอง Google — latency เพิ่ม |
+| **No EDNS** | ไม่ส่ง EDNS Client Subnet (ECS) — CDN อาจให้ IP ที่ optimize ไม่เต็มที่ |
+| **No CNAME follow** | ไม่ตาม CNAME chain — resolve เฉพาะ domain ที่เรียกตรงๆ |
+| **Hardcoded domains** | ถ้า Discord เปลี่ยน domain structure ต้องอัปเดตเอง |
+
+---
+
+## Cross-reference
+
+- [terminator.md](terminator.md) — `resolveA()` ถูกเรียกใน `terminateTls()` ก่อน tlsConnect
+- [pinner.md](pinner.md) — `pinDomain()` ใช้ `resolveA()` เพื่อ pre-fetch pins
+
+
+---
+<!-- START: docs/components/local-proxy.md -->
+---
+
+# Local HTTP CONNECT Proxy (local-proxy.ts)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [การทำงานของ HTTP CONNECT](#การทำงานของ-http-connect)
+- [Socket Management](#socket-management)
+- [Header Parsing (readHeaders)](#header-parsing-readheaders)
+- [Public API](#public-api)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+`local-proxy.ts` ทำหน้าที่เป็น **TCP proxy server** ขนาดเล็กที่เปิดฟังบน `localhost:random` เพื่อรับ HTTP CONNECT request จาก Chromium
+
+**หลักการทำงาน:**
+1. รอ Chromium เชื่อมต่อ TCP ที่ `127.0.0.1:XXXXX` (random port)
+2. Chromium ส่ง `CONNECT discord.com:443 HTTP/1.1`
+3. Proxy อ่าน HTTP headers → ได้ hostname + port
+4. ส่งต่อไปยัง `terminateTls()` ใน `terminator.ts` เพื่อจัดการ TLS bridge
+5. ไม่มีการแทรกแซง data หลังจาก CONNECT สำเร็จ — เป็น transparent tunnel
+
+---
+
+## การทำงานของ HTTP CONNECT
+
+### Protocol Flow
+
+```http
+# Chromium ส่ง:
+CONNECT discord.com:443 HTTP/1.1
+Host: discord.com:443
+Proxy-Connection: Keep-Alive
+User-Agent: Mozilla/5.0 ...
+
+# Proxy ตอบ (จาก terminator.ts):
+HTTP/1.1 200 Connection Established
+
+# หลังจากนี้คือ TLS traffic ทั้งหมด (raw socket)
+```
+
+### Request Parsing
+
+```typescript
+// regex ที่ใช้ parse
+const match = request.match(/^CONNECT\s+([^:]+):(\d+)\s+HTTP\/1\.\d/i)
+// match[1] = hostname (e.g. "discord.com")
+// match[2] = port (e.g. "443")
+```
+
+**การจัดการ error:**
+- ถ้า regex ไม่ match → `HTTP/1.1 400 Bad Request` + destroy socket
+- ถ้า hostname หรือ port ไม่ถูกต้อง → error ใน `terminateTls()` → log error
+- ถ้า socket error ระหว่างรอ headers → destroy socket
+
+---
+
+## Socket Management
+
+### Server Configuration
+
+```typescript
+const server = net.createServer({ keepAlive: true }, (clientSocket) => {
+  clientSocket.setTimeout(60_000, () => {
+    clientSocket.destroy()  // Idle timeout 60 วินาที
+  })
+  handleConnection(clientSocket)
+})
+
+server.listen(0, '127.0.0.1', () => {
+  // port = 0 → OS เลือก random port ให้
+  // 127.0.0.1 → bind เฉพาะ localhost
+})
+```
+
+### Configuration Details
+
+| พารามิเตอร์ | ค่า | เหตุผล |
+|------------|-----|--------|
+| `port` | `0` (random) | ป้องกัน port contention กับแอปอื่น |
+| `host` | `127.0.0.1` | ไม่ expose ไปยังเครือข่ายภายนอก |
+| `keepAlive` | `true` | เปิด TCP keepalive (ป้องกัน half-open connection) |
+| `idleTimeout` | `60,000 ms` | ป้องกัน zombie socket (destroy เมื่อไม่มีการส่งข้อมูล) |
+
+---
+
+## Header Parsing (readHeaders)
+
+### ฟังก์ชัน: `readHeaders(socket): Promise<string>`
+
+อ่าน HTTP headers จาก socket แบบบรรทัดต่อบรรทัดจนเจอ `\r\n\r\n`:
+
+```typescript
+function readHeaders(socket: net.Socket): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let data = ''
+    let aborted = false
+
+    const onData = (chunk: Buffer) => {
+      data += chunk.toString()
+      if (data.includes('\r\n\r\n')) {
+        cleanup()
+        resolve(data)      // headers สมบูรณ์ → resolve
+      }
+    }
+
+    const onError = (err: Error) => {
+      if (!aborted) {
+        aborted = true
+        cleanup()
+        reject(err)
+      }
+    }
+
+    const onClose = () => {
+      if (!aborted) {
+        aborted = true
+        cleanup()
+        reject(new Error('Socket closed before headers were complete'))
+      }
+    }
+
+    const cleanup = () => {
+      socket.removeListener('data', onData)
+      socket.removeListener('error', onError)
+      socket.removeListener('close', onClose)
+    }
+
+    socket.on('data', onData)
+    socket.on('error', onError)
+    socket.on('close', onClose)
+  })
+}
+```
+
+**ข้อสังเกต:**
+- ใช้ `includes('\r\n\r\n')` — หา end-of-header marker
+- `aborted` flag ป้องกันการ resolve/reject ซ้ำ (double-settle)
+- `cleanup()` ลบ event listeners หลังเสร็จ — ป้องกัน memory leak
+
+---
+
+## Public API
+
+| ฟังก์ชัน | พารามิเตอร์ | คืนค่า | คำอธิบาย |
+|---------|------------|--------|---------|
+| `startProxy()` | — | `Promise<ProxyInfo>` | เปิด proxy server บน random port |
+
+### ProxyInfo Interface
+
+```typescript
+interface ProxyInfo {
+  port: number        // random port ที่ proxy กำลังฟัง
+  close: () => void   // ฟังก์ชันหยุด server + ปิด connections ทั้งหมด
+}
+```
+
+---
+
+## Error Handling Pattern
+
+```typescript
+// error จาก terminateTls() จะไม่ทำให้ server ล่ม
+terminateTls(clientSocket, hostname, port).catch((err) => {
+  console.error(`[proxy] ${hostname}:${port} —`, (err as Error).message)
+})
+```
+
+ข้อผิดพลาดแต่ละ connection ถูกจับและ log โดยไม่กระทบ connection อื่น — server ยังคงทำงานต่อไป
+
+---
+
+## Cross-reference
+
+- [terminator.md](terminator.md) — `terminateTls()` ถูกเรียกหลังจาก parse headers สำเร็จ
+- [boot-sequence.md](../boot-sequence.md) — `startProxy()` เป็นขั้นตอนที่ 2 ของ bootstrap
+
+
+---
+<!-- START: docs/components/picker.md -->
+---
+
+# Screen/Window Picker UI (picker.ts)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [การทำงาน](#การทำงาน)
+- [HTML/CSS Template](#htmlcss-template)
+- [Public API](#public-api)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+`picker.ts` ทำหน้าที่แสดง UI ขนาดเล็กสำหรับให้ผู้ใช้เลือกหน้าจอหรือหน้าต่างที่จะแชร์ (screen sharing) ใน Discord
+
+**หลักการทำงาน:**
+1. รับรายการ `DesktopCapturerSource[]` จาก `desktopCapturer.getSources()` ใน `index.ts`
+2. สร้าง HTML/CSS inline (ไม่มีไฟล์ภายนอก) แสดง thumbnail + ชื่อของแต่ละ source
+3. เปิด `BrowserWindow` ขนาดเล็กแบบ modal
+4. ผู้ใช้คลิกเลือก → คืนค่า selected source กลับผ่าน Promise
+5. ถ้าผู้ใช้ปิดหน้าต่าง → คืน `undefined` (cancel)
+
+---
+
+## การทำงาน
+
+### Data Flow
+
+```
+index.ts
+  │
+  ├── desktopCapturer.getSources({ types: ['screen', 'window'] })
+  ├── กรอง Discord windows ออกจาก picker
+  │
+  ├── showPicker(filteredSources)
+  │   │
+  │   ├── buildHtml(sources) → HTML string
+  │   ├── encodeURIComponent → data URI
+  │   ├── new BrowserWindow({ show: false })
+  │   ├── picker.loadURL(dataUri)
+  │   │
+  │   ├── did-finish-load → วัด content height → resize → center → show
+  │   │
+  │   ├── Polling (150ms)
+  │   │   └── executeJavaScript('window.__selectedIndex')
+  │   │       ├── มีค่า → settle → close → resolve(source)
+  │   │       └── ไม่มี → continue polling
+  │   │
+  │   └── picker.closed → resolve(undefined) (cancel)
+  │
+  └── callback({ video: source, audio: 'loopback' })
+```
+
+### Window Configuration
+
+```typescript
+const picker = new BrowserWindow({
+  width: 600,
+  height: 400,          // Temporary — จะ resize หลังจากวัด content
+  show: false,           // ซ่อนจนกว่าจะ resize เสร็จ
+  resizable: false,
+  minimizable: false,
+  maximizable: false,
+  title: 'แชร์หน้าจอ',
+  autoHideMenuBar: true,
+  webPreferences: {
+    sandbox: true,
+    contextIsolation: true,  // Security hardening
+  },
+})
+```
+
+### Content Measurement
+
+```typescript
+picker.webContents.on('did-finish-load', async () => {
+  const contentHeight = await picker.webContents.executeJavaScript(
+    'document.documentElement.scrollHeight',
+  )
+  picker.setContentSize(600, Math.min(Math.max(contentHeight + 4, 200), 520))
+  picker.center()
+  picker.show()
+})
+```
+
+- วัดความสูงของ content จริง → resize window ให้พอดี
+- clamp 200–520px (ไม่เล็กเกินไป ไม่ใหญ่เกินไป)
+- `show: false` → `show()` → ไม่กระตุก
+
+### Selection Polling
+
+```typescript
+const poll = setInterval(async () => {
+  try {
+    const idx = await picker.webContents.executeJavaScript('window.__selectedIndex')
+    if (idx === null || idx === undefined || settled) return
+
+    settled = true
+    clearInterval(poll)
+    picker.close()
+
+    if (idx < 0 || idx >= sources.length) {
+      resolve(undefined)
+      return
+    }
+    resolve(sources[idx]!)
+  } catch {
+    // Page might not be loaded yet — keep polling
+  }
+}, 150)
+```
+
+- Polling ทุก 150ms
+- `settled` flag ป้องกัน double resolve
+- ถ้า index ไม่อยู่ในช่วง → cancel
+
+---
+
+## HTML/CSS Template
+
+### ฟังก์ชัน: `buildHtml(sources)`
+
+```typescript
+function buildHtml(sources: DesktopCapturerSource[]): string {
+  const cards = sources
+    .map((s, i) => `
+    <div class="card" data-index="${i}">
+      <img src="${s.thumbnail.toDataURL()}" alt="${escapeAttr(s.name)}" />
+      <div class="name" title="${escapeAttr(s.name)}">${escapeAttr(s.name)}</div>
+      <div class="badge">${s.appIcon ? 'หน้าต่าง' : 'หน้าจอ'}</div>
+    </div>`)
+    .join('')
+
+  return `<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: #1e1e1e; color: #b5bac1;
+    padding: 16px; user-select: none;
+  }
+  h2 { font-size: 15px; font-weight: 600; color: #f2f3f5; margin-bottom: 12px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(20%, 1fr));
+    gap: 8px;
+  }
+  .card {
+    background: #2a2a2a; border-radius: 8px;
+    padding: 6px; cursor: pointer;
+    text-align: center; transition: background .15s, outline .15s;
+  }
+  .card:hover { background: #333; outline: 2px solid #5865f2; }
+  .card img {
+    width: 100%; aspect-ratio: 16 / 10;
+    object-fit: cover; border-radius: 4px;
+    display: block; background: #111;
+  }
+  .name {
+    margin-top: 6px; font-size: 12px; color: #dbdee1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .badge { font-size: 10px; color: #80848e; margin-top: 2px; }
+</style>
+</head>
+<body>
+  <h2>แชร์หน้าจอหรือหน้าต่าง</h2>
+  <div class="grid">${cards}</div>
+  <script>
+    document.querySelectorAll('.card').forEach(el => {
+      el.addEventListener('click', () => {
+        window.__selectedIndex = parseInt(el.dataset.index, 10);
+      });
+    });
+  </script>
+</body>
+</html>`
+}
+```
+
+### คุณสมบัติ UI
+
+| องค์ประกอบ | รายละเอียด |
+|-----------|-----------|
+| **Card Layout** | Grid responsive — auto-fill, min 20% width |
+| **Thumbnail** | `s.thumbnail.toDataURL()` — data URI ขนาด 200x150px |
+| **Hover Effect** | `outline: 2px solid #5865f2` (Discord brand color) |
+| **Badge** | แสดง "หน้าต่าง" หรือ "หน้าจอ" |
+| **Name** | Truncated with ellipsis |
+
+---
+
+## Public API
+
+| ฟังก์ชัน | พารามิเตอร์ | คืนค่า | คำอธิบาย |
+|---------|------------|--------|---------|
+| `showPicker(sources)` | `sources: DesktopCapturerSource[]` | `Promise<DesktopCapturerSource \| undefined>` | เปิด picker และรอผู้ใช้เลือก |
+
+---
+
+## Notes
+
+1. **ไม่ใช้ external dependencies** — HTML/CSS/JS inline — ไม่ต้องโหลดไฟล์เพิ่ม
+2. **Content Protection** — Discord window ที่มี `setContentProtection(true)` จะแสดง thumbnail สีดำ → filter ออกจาก picker ใน `index.ts`
+3. **Sandboxed** — `sandbox: true`, `contextIsolation: true` — renderer แยกจาก main process
+4. **Window Filtering** — Discord windows ถูก filter ใน `index.ts` (`s.name.includes('discord')`) → ผู้ใช้ไม่สับสน
+
+---
+
+## Cross-reference
+
+- [boot-sequence.md](../boot-sequence.md) — `createWindow()` ใน `index.ts` เรียก `showPicker()` เมื่อ screen share
+- [security-model.md](../security-model.md) — Content protection + permission handlers
+
+
+---
+<!-- START: docs/components/pinner.md -->
+---
+
+# Certificate Pinning (pinner.ts)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [SPKI Fingerprint](#spki-fingerprint)
+- [กลไกการทำงาน](#กลไกการทำงาน)
+- [TOFU (Trust-On-First-Use)](#tofu-trust-on-first-use)
+- [Pre-fetch (Bootstrap)](#pre-fetch-bootstrap)
+- [Verify (Per-request)](#verify-per-request)
+- [Public API](#public-api)
+- [ข้อควรระวัง](#ข้อควรระวัง)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+`pinner.ts` เพิ่ม **ความปลอดภัยในการตรวจสอบตัวตนของเซิร์ฟเวอร์ Discord** ด้วยเทคนิค Certificate Pinning — ตรวจสอบ Public Key ของใบรับรองจริงๆ เทียบกับค่าที่รู้จัก เพื่อป้องกัน MITM Attack แม้ไม่ส่ง SNI
+
+**แนวคิด:**
+
+```
+Pre-fetch (bootstrap):
+  resolveA("discord.com") → tls.connect(IP, 443, { servername: undefined })
+  → getPeerCertificate()
+  → compute SPKI fingerprint (SHA-256 ของ SubjectPublicKeyInfo)
+  → store ใน pinStore (in-memory Map)
+
+Verify (per request, terminator.ts):
+  TLS handshake กับ Discord เสร็จ → getPeerCertificate()
+  → verifyPin(hostname, cert)
+  → fingerprint ตรง → ✅ pipe data
+  → fingerprint ไม่ตรง → ❌ destroy socket (MITM detected!)
+```
+
+---
+
+## SPKI Fingerprint
+
+### SubjectPublicKeyInfo (SPKI)
+
+ใช้ **public key** ไม่ใช่ทั้ง certificate:
+- เมื่อ Discord ต่ออายุ certificate ด้วย key pair เดิม → pin ยังใช้ได้ (SPKI fingerprint ไม่เปลี่ยน)
+- ไม่ต้องพึ่งพา CN/SAN — ซึ่งไม่สามารถตรวจสอบได้เพราะไม่มี SNI
+
+### การคำนวณ: `computeSpkiFingerprint(cert)`
+
+```typescript
+function computeSpkiFingerprint(cert: tls.PeerCertificate): string {
+  // Primary path: cert.raw + X509Certificate (reliable)
+  if (cert.raw) {
+    const x509 = new crypto.X509Certificate(cert.raw)
+    const spkiDer = x509.publicKey.export({ type: 'spki', format: 'der' })
+    const hash = crypto.createHash('sha256').update(spkiDer).digest('base64')
+    return `sha256/${hash}`
+  }
+
+  // Fallback: cert.pubkey (อาจ undefined ในบาง environment)
+  const pubkey = cert.pubkey
+  if (!pubkey) throw new Error('Certificate has no public key and no raw DER')
+
+  let spkiDer: Buffer
+  if (typeof (pubkey as any).export === 'function') {
+    spkiDer = (pubkey as any).export({ type: 'spki', format: 'der' })
+  } else {
+    spkiDer = pubkey as unknown as Buffer  // Node < 15
+  }
+
+  const hash = crypto.createHash('sha256').update(spkiDer).digest('base64')
+  return `sha256/${hash}`
+}
+```
+
+**รูปแบบ:** `sha256/<base64>` — format เดียวกับ HPKP (RFC 7469)
+
+---
+
+## กลไกการทำงาน
+
+### State
+
+```typescript
+interface PinEntry {
+  spkiFingerprint: string  // "sha256/<base64>"
+}
+
+const pinStore = new Map<string, PinEntry>()
+```
+
+### Flow Diagram
+
+```
+bootstrap()
+  │
+  ├── resolveA("discord.com") → DoH (Cloudflare)
+  ├── tls.connect({ host: IP, servername: undefined })
+  ├── secureConnect → getPeerCertificate()
+  ├── compute SHA-256 ของ SPKI DER
+  └── store pinStore["discord.com"] = "sha256/abc123..."
+
+terminateTls("discord.com")
+  │
+  ├── signCert() + 200 + server TLS (เหมือนเดิม)
+  ├── resolveA() + tlsConnect(IP, 443) → TLS handshake (NO SNI)
+  ├── getPeerCertificate()
+  ├── verifyPin("discord.com", cert)
+  │   ├── pinStore มี → เทียบ fingerprint
+  │   │   ├── ตรง → ✅ pipe data
+  │   │   └── ไม่ตรง → ❌ MITM detected! destroy socket
+  │   └── pinStore ไม่มี → TOFU (Trust On First Use)
+  └── pipe(serverSide, serverSide2)
+```
+
+---
+
+## TOFU (Trust-On-First-Use)
+
+### หลักการ
+
+```typescript
+export function verifyPin(hostname: string, cert: tls.PeerCertificate): Error | undefined {
+  const existing = pinStore.get(hostname)
+
+  if (!existing) {
+    // Trust On First Use — ไม่มี pin มาก่อน → เก็บ cert ปัจจุบันเป็น pin
+    storePin(hostname, cert)
+    return undefined  // OK
+  }
+
+  // ... verification logic
+}
+```
+
+**ข้อดี:** ไม่ต้อง hardcode pin ล่วงหน้า — ระบบเรียนรู้ pin ด้วยตัวเอง
+**ข้อเสีย (TOFU Risk):** ถ้า attacker MITM ในครั้งแรก → pin ที่เก็บไว้คือของ attacker
+
+### การบรรเทาความเสี่ยง TOFU
+
+- **Pre-fetch:** `pinAllDiscordDomains()` ทำงานตั้งแต่ bootstrap (ก่อนมี traffic จริง)
+- **ถ้า pre-fetch สำเร็จ:** ทุก domain มี pin แล้วก่อนที่ Chromium จะเชื่อมต่อ
+- **ถ้า pre-fetch ล้มเหลว:** TOFU จะทำงานใน request แรก — มีความเสี่ยงในช่วงแรก
+
+---
+
+## Pre-fetch (Bootstrap)
+
+### ฟังก์ชัน: `pinDomain(hostname)`
+
+```typescript
+async function pinDomain(hostname: string): Promise<void> {
+  const ips = await resolveA(hostname)
+  if (ips.length === 0) throw new Error(`DoH returned no IPs for ${hostname}`)
+
+  return new Promise<void>((resolve, reject) => {
+    const socket = tls.connect({
+      host: ips[0]!,
+      port: 443,
+      servername: undefined,   // ★ No SNI — matches production behaviour
+      rejectUnauthorized: true,
+      checkServerIdentity: () => undefined,
+    })
+
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(new Error(`Timeout connecting to ${hostname}`))
+    }, 10_000)
+
+    socket.on('secureConnect', () => {
+      clearTimeout(timer)
+      const cert = socket.getPeerCertificate()
+      storePin(hostname, cert)
+      socket.end()
+      socket.destroy()
+      resolve()
+    })
+
+    socket.on('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+  })
+}
+```
+
+### ฟังก์ชัน: `pinAllDiscordDomains()`
+
+```typescript
+export async function pinAllDiscordDomains(): Promise<void> {
+  const domains = [
+    'discord.com',
+    'cdn.discordapp.com',
+    'media.discordapp.net',
+    'gateway.discord.gg',
+    'discord.gg',
+    'discordapp.com',
+  ]
+
+  const results = await Promise.allSettled(
+    domains.map((domain) =>
+      pinDomain(domain)
+        .then(() => ({ domain, ok: true as const }))
+        .catch((err: unknown) => ({
+          domain,
+          ok: false as const,
+          error: (err as Error).message,
+        })),
+    ),
+  )
+  // log results
+}
+```
+
+**เรียกระหว่าง bootstrap** — async, non-blocking:
+- ทุก domain ทำแบบ parallel (Promise.allSettled)
+- Fail → log warning, ไม่ halt boot
+- Timeout: 10 วิ ต่อ domain
+
+---
+
+## Verify (Per-request)
+
+### ฟังก์ชัน: `verifyPin(hostname, cert)`
+
+```typescript
+export function verifyPin(
+  hostname: string,
+  cert: tls.PeerCertificate,
+): Error | undefined {
+  const existing = pinStore.get(hostname)
+
+  if (!existing) {
+    // TOFU
+    storePin(hostname, cert)
+    return undefined
+  }
+
+  try {
+    const actual = computeSpkiFingerprint(cert)
+
+    if (actual !== existing.spkiFingerprint) {
+      return new Error(
+        `Certificate pin mismatch for ${hostname}\n` +
+        `  Expected SPKI: ${existing.spkiFingerprint}\n` +
+        `  Actual SPKI:   ${actual}`,
+      )
+    }
+
+    return undefined  // OK
+  } catch (err) {
+    return new Error(
+      `Failed to verify cert pin for ${hostname}: ${(err as Error).message}`,
+    )
+  }
+}
+```
+
+| กรณี | ผล | คำอธิบาย |
+|------|-----|---------|
+| Pin exists + fingerprint ตรง | `undefined` (OK) | ตัวตน verified |
+| Pin exists + fingerprint ไม่ตรง | `Error` | MITM detected! Caller ต้อง destroy socket |
+| No pin exists | TOFU (store + `undefined`) | เรียนรู้ pin ใหม่ |
+
+---
+
+## Public API
+
+| ฟังก์ชัน | พารามิเตอร์ | คืนค่า | คำอธิบาย |
+|---------|------------|--------|---------|
+| `verifyPin(hostname, cert)` | `hostname: string`, `cert: PeerCertificate` | `Error \| undefined` | ตรวจสอบ cert เทียบ pin หรือ TOFU |
+| `isPinned(hostname)` | `hostname: string` | `boolean` | เช็คว่า domain มี pin แล้วหรือยัง |
+| `pinAllDiscordDomains()` | — | `Promise<void>` | Pre-fetch pins สำหรับ 6 Discord domains |
+
+---
+
+## ข้อควรระวัง
+
+1. **TOFU Risk** — การเชื่อมต่อครั้งแรกสุ่มเสี่ยง ถ้า attacker อยู่บน network ในจังหวะนั้น
+2. **No Pin Rotation** — เมื่อ pin แล้ว ไม่มี mechanism อัปเดต — ถ้า Discord เปลี่ยน key pair → connection reject
+3. **No Backup Pins** — ควรมี pin หลายค่า (main + backup) สำหรับ key rotation
+4. **Single IP Pre-fetch** — Pre-fetch ไปยัง IP แรกที่ DoH คืน — อาจไม่ใช่ IP ที่ CDN จ่ายใน request จริง
+5. **HPKP (HTTP Public Key Pinning)** ไม่มี — application-level pinning เท่านั้น
+
+---
+
+## Cross-reference
+
+- [terminator.md](terminator.md) — `verifyPin()` ถูกเรียกใน `terminateTls()` หลัง client TLS handshake
+- [doh-resolver.md](doh-resolver.md) — `resolveA()` ใช้สำหรับ pre-fetch pins
+- [security-model.md](../security-model.md) — ดูการวิเคราะห์ความปลอดภัยของ pinning
+- [limitations.md](../limitations.md) — TOFU risk และข้อจำกัดอื่นๆ
+
+
+---
+<!-- START: docs/components/terminator.md -->
+---
+
+# TLS Termination Bridge (terminator.ts)
+
+## สารบัญ
+- [ภาพรวม](#ภาพรวม)
+- [การทำงานทีละขั้นตอน](#การทำงานทีละขั้นตอน)
+- [Safety Timeouts](#safety-timeouts)
+- [TLS Connect (Client-side)](#tls-connect-client-side)
+- [Wait For Secure (Server-side)](#wait-for-secure-server-side)
+- [Piping และ Cleanup](#piping-และ-cleanup)
+- [ข้อสังเกตสำคัญ](#ข้อสังเกตสำคัญ)
+- [Cross-reference](#cross-reference)
+
+---
+
+## ภาพรวม
+
+`terminator.ts` คือ **หัวใจของระบบ** — ทำหน้าที่เป็นสะพาน (bridge) ระหว่าง TLS สองฝั่ง:
+
+```
+Chromium ←── Server-side TLS ←──→ terminator.ts ←──→ Client-side TLS (NO SNI) ←──→ Discord
+```
+
+**ความรับผิดชอบ:**
+1. สร้าง certificate สำหรับ domain ที่ร้องขอ (เรียก `signCert()`)
+2. ตอบ `200 Connection Established` กลับไปยัง Chromium
+3. ทำ Server-side TLS กับ Chromium (proxy ปลอมตัวเป็น Discord)
+4. ถาม IP จริงของ Discord ผ่าน DoH
+5. ทำ Client-side TLS ไปยัง Discord **โดยไม่ส่ง SNI**
+6. ตรวจสอบ Certificate Pinning หลัง TLS handshake
+7. Pipe HTTP/2 data ระหว่างสอง TLS sockets
+
+---
+
+## การทำงานทีละขั้นตอน
+
+### Sequence Diagram
+
+```
+Chromium                          terminator.ts                      Discord Server
+   │                                    │                                │
+   │──── CONNECT discord.com:443 ──────▶│                                │
+   │                                    │                                │
+   │                                    │── signCert("discord.com")    │
+   │                                    │   (ca.ts)                     │
+   │                                    │                                │
+   │◀── 200 Connection Established ─────│                                │
+   │                                    │                                │
+   │═══ TLS ClientHello ══════════════▶│═══ Server-side TLS ══════════▶│
+   │    (คิดว่า proxy คือ Discord)      │    (isServer: true,           │
+   │                                    │     ใช้ cert ที่ sign ใหม่)  │
+   │                                    │                                │
+   │◀══ Server Hello + Cert ═══════════│                                │
+   │                                    │                                │
+   │═══ Change Cipher Spec ═══════════▶│                                │
+   │◀══ Change Cipher Spec ════════════│                                │
+   │                                    │                                │
+   │              [TLS Established]     │                                │
+   │                                    │                                │
+   │                                    │── resolveA("discord.com")    │
+   │                                    │   (doh-resolver.ts)          │
+   │                                    │   → Cloudflare DoH           │
+   │                                    │   → ["104.16.X.X", ...]      │
+   │                                    │                                │
+   │                                    │── tlsConnect(IP, 443)        │
+   │                                    │    (isServer: false,          │
+   │                                    │     servername: undefined)    │
+   │                                    │    ★ NO SNI ★               │
+   │                                    │                                │
+   │                                    │═══ TLS Handshake ═══════════▶│
+   │                                    │◀══ Certificate + Verify ═════│
+   │                                    │                                │
+   │                                    │── verifyPin("discord.com")   │
+   │                                    │   (pinner.ts)                │
+   │                                    │   → SPKI fingerprint check   │
+   │                                    │                                │
+   │◀══ HTTP/2 plaintext ══════════════│◀══ HTTP/2 plaintext ═════════│
+   │    (ผ่าน .pipe())                  │    (ผ่าน .pipe())             │
+   │════ HTTP/2 plaintext ════════════▶│════ HTTP/2 plaintext ════════▶│
+   │                                    │                                │
+```
+
+### ขั้นตอนโดยละเอียด
+
+#### Step 1: signCert(hostname)
+
+```typescript
+const bundle = signCert(hostname)
+```
+- เรียก `ca.ts` เพื่อสร้าง certificate สำหรับ domain
+- **สำคัญ:** ต้องทำ **ก่อน** ส่ง `200 Connection Established` — Chromium รอ response
+
+#### Step 2: 200 Connection Established
+
+```typescript
+clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+```
+- Chromium ทราบว่าสามารถเริ่ม TLS handshake ได้
+- หลังจากนี้ data บน socket คือ TLS traffic
+
+#### Step 3: Server-side TLS (กับ Chromium)
+
+```typescript
+const serverSide = new tls.TLSSocket(clientSocket, {
+  isServer: true,
+  key: bundle.key,       // private key ของ domain cert
+  cert: bundle.cert,     // certificate ที่ sign โดย Root CA
+})
+await waitForSecure(serverSide)
+```
+- Proxy ทำหน้าที่เป็น TLS server
+- Chromium คิดว่ากำลังเชื่อมต่อ Discord โดยตรง
+- หลัง `waitForSecure()` → TLS terminated → HTTP/2 plaintext
+
+#### Step 4: DoH Resolution
+
+```typescript
+const ips = await resolveA(hostname)
+if (ips.length === 0) {
+  serverSide.destroy()
+  throw new Error(`DoH returned no IPs for ${hostname}`)
+}
+```
+- ถาม Cloudflare/Google ว่า IP จริงของ Discord คืออะไร
+- ถ้าไม่มี IP → destroy socket + throw error
+
+#### Step 5: Client-side TLS (ไปยัง Discord) ★ สำคัญที่สุด
+
+```typescript
+const serverSide2 = await tlsConnect(ips[0]!, port)
+```
+- สร้าง TLS connection ใหม่ไปยัง Discord
+- **ไม่มี SNI** — network ไม่เห็น target domain
+- ดูรายละเอียดใน [TLS Connect (Client-side)](#tls-connect-client-side)
+
+#### Step 6: Certificate Pinning
+
+```typescript
+const cert = serverSide2.getPeerCertificate()
+if (!cert || !cert.raw) {
+  serverSide2.destroy()
+  throw new Error(`No certificate available for ${hostname}`)
+}
+const pinError = verifyPin(hostname, cert)
+if (pinError) {
+  serverSide2.destroy()
+  throw pinError
+}
+```
+- ตรวจสอบ SPKI fingerprint ของ certificate ที่ Discord ส่งมา
+- เทียบกับค่าที่ pre-fetch ไว้ตอน bootstrap (หรือ TOFU)
+- ถ้าไม่ตรง → MITM detected → destroy socket
+
+#### Step 7: Bridge/Pipe Data
+
+```typescript
+serverSide.pipe(serverSide2)  // Chromium → Discord
+serverSide2.pipe(serverSide)  // Discord → Chromium
+
+const cleanup = () => {
+  serverSide.destroy()
+  serverSide2.destroy()
+}
+serverSide.on('error', cleanup)
+serverSide.on('close', cleanup)
+serverSide2.on('error', cleanup)
+serverSide2.on('close', cleanup)
+```
+- HTTP/2 data ถูก pipe แบบ transparent
+- ถ้าฝั่งใดฝั่งหนึ่ง error/close → destroy ทั้งสอง socket
+
+---
+
+## Safety Timeouts
+
+| ฟังก์ชัน | ใช้ที่ | Timeout Default | เกิดอะไรขึ้นเมื่อ timeout |
+|----------|-------|-----------------|------------------------|
+| `tlsConnect()` | Client-side TLS ไปยัง Discord IP | 15,000 ms | destroy socket + reject promise |
+| `waitForSecure()` | Server-side TLS กับ Chromium | 10,000 ms | reject promise + cleanup listeners |
+
+ทั้งสองฟังก์ชันใช้ `settled` flag และ `clearTimeout()` เพื่อป้องกัน **double resolve/reject**:
+
+```typescript
+let settled = false
+const timer = setTimeout(() => {
+  if (!settled) {
+    settled = true
+    socket.destroy()
+    reject(new Error('Timeout'))
+  }
+}, timeoutMs)
+socket.on('secureConnect', () => {
+  if (!settled) {
+    settled = true
+    clearTimeout(timer)
+    resolve(socket)
+  }
+})
+socket.on('error', (err) => {
+  if (!settled) {
+    settled = true
+    clearTimeout(timer)
+    reject(err)
+  }
+})
+```
+
+---
+
+## TLS Connect (Client-side)
+
+### ฟังก์ชัน: `tlsConnect(ip, port, timeoutMs)`
+
+```typescript
+function tlsConnect(
+  ip: string,
+  port: number,
+  timeoutMs = 15_000,
+): Promise<tls.TLSSocket> {
+  return new Promise<tls.TLSSocket>((resolve, reject) => {
+    let settled = false
+
+    const socket = tls.connect({
+      host: ip,
+      port,
+      servername: undefined,       // ★ No SNI — obfuscation
+      rejectUnauthorized: true,
+      checkServerIdentity: () => undefined, // Bypass hostname check (no SNI)
+    })
+    // ... timeout + event handlers
+  })
+}
+```
+
+### ประเด็นสำคัญ
+
+| พารามิเตอร์ | ค่า | เหตุผล |
+|------------|-----|--------|
+| `host` | `ip` (DoH result) | เชื่อมต่อด้วย IP โดยตรง ไม่ใช้ domain |
+| `servername` | `undefined` | **ไม่ส่ง SNI** → network ไม่รู้ target domain |
+| `rejectUnauthorized` | `true` | ยังตรวจสอบ chain of trust ของ Discord cert |
+| `checkServerIdentity` | `() => undefined` | bypass hostname check (ไม่มี SNI) — ป้องกันด้วย pinning |
+
+**ทำไมใช้ `tls.connect()` ไม่ใช่ `new tls.TLSSocket(wrapping)`:**
+- wrapping อาจทำให้ `getPeerCertificate()` ไม่ populate `raw`/`pubkey`
+- โดยเฉพาะเมื่อ `servername` เป็น `undefined`
+
+---
+
+## Wait For Secure (Server-side)
+
+### ฟังก์ชัน: `waitForSecure(socket, timeoutMs)`
+
+```typescript
+function waitForSecure(
+  socket: tls.TLSSocket,
+  timeoutMs = 10_000,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (socket.encrypted) {
+      resolve()  // Already secure (rare case)
+      return
+    }
+    // ... timeout + event handlers for 'secure', 'error', 'close'
+  })
+}
+```
+
+รองรับ 3 events:
+| Event | เกิดเมื่อ | ผล |
+|-------|---------|-----|
+| `secure` | TLS handshake สำเร็จ | resolve |
+| `error` | TLS handshake ล้มเหลว | reject |
+| `close` | Socket ปิดก่อน handshake | reject |
+
+---
+
+## Piping และ Cleanup
+
+### Data Flow
+
+```
+serverSide (decrypted HTTP/2)
+        │
+        ├── .pipe(serverSide2) → Client TLS → Discord
+        │
+serverSide2 (decrypted HTTP/2)
+        │
+        └── .pipe(serverSide) → Server TLS → Chromium
+```
+
+### Cleanup Logic
+
+```typescript
+const cleanup = () => {
+  serverSide.destroy()
+  serverSide2.destroy()
+}
+
+serverSide.on('error', cleanup)
+serverSide.on('close', cleanup)
+serverSide2.on('error', cleanup)
+serverSide2.on('close', cleanup)
+```
+
+ทั้ง 4 events trigger cleanup:
+- socket ใด socket หนึ่ง error → destroy ทั้งคู่
+- socket ใด socket หนึ่ง close → destroy ทั้งคู่
+
+---
+
+## ข้อสังเกตสำคัญ
+
+1. **No Connection Pooling** — ทุก request สร้าง TLS socket ใหม่ → latency + overhead
+2. **No ALPN Setting** — ไม่ได้ระบุ ALPN protocols (`h2`, `http/1.1`) — ใช้ default ของ Node.js
+3. **RSA Key Gen ทุก Connection แรก** — CPU-intensive (~2-5ms) แต่บรรเทาด้วย cert cache 1 ชม.
+4. **WebSocket Support** — การ pipe raw data (HTTP/2) ควรรองรับ WebSocket upgrade โดยธรรมชาติ
+
+---
+
+## Cross-reference
+
+- [ca.md](ca.md) — `signCert()` สร้าง certificate สำหรับ server-side TLS
+- [doh-resolver.md](doh-resolver.md) — `resolveA()` สำหรับหา IP Discord
+- [pinner.md](pinner.md) — `verifyPin()` ตรวจสอบ SPKI fingerprint หลัง TLS handshake
+- [connection-flow.md](../connection-flow.md) — ดูภาพรวมการเชื่อมต่อ 1 ครั้ง
+
+
+---
+*Auto-generated by `scripts/generate-llms.ts` on 2026-06-19T00:56:59.223Z.*
+*Source files: README.md, docs/**/*.md*
