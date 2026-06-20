@@ -110,4 +110,4 @@ obfuscord/
 
 ## เครดิต
 
-พัฒนาโดย [ITC6910120](https://github.com/ITC6910120) — OpenCode agent `@build` ตามหลัก Clean Code 6 ข้อ
+พัฒนาโดย [ITC6910120](https://github.com/ITC6910120) และ [Onlygummy](https://github.com/Onlygummy)
