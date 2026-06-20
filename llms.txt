@@ -1,0 +1,90 @@
+# Obfuscord — Discord Obfuscated Desktop Client
+
+> Desktop client สำหรับ Discord ที่อำพรางการสื่อสารระดับเครือข่าย
+> ด้วยเทคนิค Man-in-the-Middle (MITM) TLS proxy ที่ทำงานในหน่วยความจำ (In-Memory)
+
+## Core Architecture
+
+```
+Chromium → local-proxy → server-side TLS (cert โดย In-Memory CA)
+                       → DoH resolve IP → client-side TLS (NO SNI) → Discord
+```
+
+## Key Principles
+
+- **No SNI**: `servername: undefined` → ClientHello ไม่มี Server Name Indication → DPI ไม่รู้ target domain
+- **In-Memory CA**: Root CA + per-domain certificates ใน RAM ทั้งหมด, ไม่มีไฟล์ `.pem`, `.crt`, `.key` บนดิสก์
+- **Certificate Pinning**: SPKI fingerprint (SHA-256 ของ SubjectPublicKeyInfo) ตรวจสอบ Discord certificate หลัง TLS handshake — ป้องกัน MITM
+- **DoH DNS**: Cloudflare DoH (primary) → Google DoH (fallback), in-memory cache พร้อม TTL clamp 60–600 วินาที
+- **Dual Certificate Verify**: `certificate-error` event + `setCertificateVerifyProc` — ตรวจสอบ issuerName ว่า cert มาจาก CA ของเราเท่านั้น
+
+## Tech Stack
+
+| Technology | Version | Role |
+|------------|---------|------|
+| **Bun** | 1.3.14+ | Runtime + Bundler (ไม่ใช้ tsc) |
+| **Electron** | 42.4.1 | Chromium wrapper |
+| **TypeScript** | 5.x | ภาษา |
+| **node-forge** | 1.4.0 | Pure JS crypto (RSA, X.509, PEM) |
+| **Cloudflare DoH** | — | DNS resolution หลัก |
+| **Google DoH** | — | DNS resolution สำรอง |
+
+## Modules
+
+| Module | File | Dependencies |
+|--------|------|-------------|
+| **Entry point** | `index.ts` | ca, local-proxy, pinner, picker |
+| **CA** | `src/ca.ts` | node-forge |
+| **Local proxy** | `src/local-proxy.ts` | terminator |
+| **Terminator** | `src/terminator.ts` | ca, doh-resolver, pinner |
+| **DoH resolver** | `src/doh-resolver.ts` | — |
+| **Pinner** | `src/pinner.ts` | doh-resolver |
+| **Picker** | `src/picker.ts` | Electron |
+
+## Key Files
+
+- `index.ts` — Electron main process, boot sequence, proxy config, window creation
+- `src/terminator.ts` — TLS termination bridge (หัวใจของระบบ)
+- `src/ca.ts` — In-memory Root CA generation + per-domain cert signing
+- `src/pinner.ts` — Certificate pinning with SPKI fingerprint + TOFU
+- `src/doh-resolver.ts` — DNS-over-HTTPS with in-memory cache
+- `src/local-proxy.ts` — HTTP CONNECT proxy on random localhost port
+
+## Critical Boot Order (must not change)
+
+1. Module-level `certificate-error` handler registration
+2. `initCa()` — generate Root CA
+3. `startProxy()` — start local proxy
+4. `pinAllDiscordDomains()` — pre-fetch pins (async, non-blocking)
+5. `app.whenReady()` — Electron ready
+6. `session.defaultSession.setProxy()` — route Chromium through our proxy
+7. `createWindow()` — load `https://discord.com/app`
+
+## Known Limitations
+
+- **IPv4 only**: DoH query type A เท่านั้น, IPv6 จะ fail
+- **TOFU Risk**: การเชื่อมต่อครั้งแรกสุ่มเสี่ยงต่อ MITM (ถ้า pre-fetch ยังไม่เสร็จ)
+- **No connection pooling**: ทุก request สร้าง TLS socket ใหม่
+- **Hardcoded domains**: 6 Discord domains ต้องอัปเดตเอง
+- **No tests**: เปลี่ยนโค้ดต้อง manual test ทุกครั้ง
+
+
+## Documentation Index
+
+| Document | Description |
+|----------|-------------|
+| [docs/architecture.md](docs/architecture.md) | การเชื่อมต่อไปยัง Discord โดยปกติจะ: |
+| [docs/boot-sequence.md](docs/boot-sequence.md) | ลำดับการบู๊ตของ Obfuscord ถูกออกแบบให้แต่ละขั้นตอนขึ้นต่อกัน (sequential dependencies) — การเปลี่ยนลำดับอาจทำให้ระบบทำงา... |
+| [docs/connection-flow.md](docs/connection-flow.md) | เมื่อผู้ใช้เปิด Discord แล้ว Chromium ต้องการโหลด `https://discord.com/app` — คำขอเดียวนี้ต้องผ่านขั้นตอนต่างๆ มากมายตั้... |
+| [docs/development.md](docs/development.md) | Obfuscord ใช้ **Bun** เป็นทั้ง runtime และ bundler (ไม่ใช้ `tsc`) และ **Electron** สำหรับ desktop wrapper |
+| [docs/limitations.md](docs/limitations.md) | Obfuscord เป็น proof-of-concept / experimental project ที่มีข้อจำกัดหลายประการที่ควรทราบก่อนนำไปใช้จริง |
+| [docs/security-model.md](docs/security-model.md) | Obfuscord มีมาตรการรักษาความปลอดภัยหลายชั้น (defense in depth) ทั้งในระดับเครือข่าย (TLS, DNS, proxy) และระดับแอปพลิเคชั... |
+| [docs/components/ca.md](docs/components/ca.md) | `ca.ts` ทำหน้าที่สร้างและจัดการ **Certificate Authority และใบรับรองทั้งหมดในหน่วยความจำ (In-Memory)** โดยไม่มีการเขียนไฟ... |
+| [docs/components/doh-resolver.md](docs/components/doh-resolver.md) | `doh-resolver.ts` ทำหน้าที่ **DNS resolution ผ่าน HTTPS** แทนการใช้ DNS ปกติของระบบปฏิบัติการ |
+| [docs/components/local-proxy.md](docs/components/local-proxy.md) | `local-proxy.ts` ทำหน้าที่เป็น **TCP proxy server** ขนาดเล็กที่เปิดฟังบน `localhost:random` เพื่อรับ HTTP CONNECT reques... |
+| [docs/components/picker.md](docs/components/picker.md) | `picker.ts` ทำหน้าที่แสดง UI ขนาดเล็กสำหรับให้ผู้ใช้เลือกหน้าจอหรือหน้าต่างที่จะแชร์ (screen sharing) ใน Discord |
+| [docs/components/pinner.md](docs/components/pinner.md) | `pinner.ts` เพิ่ม **ความปลอดภัยในการตรวจสอบตัวตนของเซิร์ฟเวอร์ Discord** ด้วยเทคนิค Certificate Pinning — ตรวจสอบ Public... |
+| [docs/components/terminator.md](docs/components/terminator.md) | `terminator.ts` คือ **หัวใจของระบบ** — ทำหน้าที่เป็นสะพาน (bridge) ระหว่าง TLS สองฝั่ง: |
+
+---
+*Auto-generated by `scripts/generate-llms.ts`. For full content see [llms-full.txt](llms-full.txt).*
